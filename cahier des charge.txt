@@ -1,0 +1,65 @@
+📺 Cahier des Charges : Projet "MyFlix"
+
+Objectif : Créer un Media Center auto-hébergé ultra-performant avec une interface inspirée de Netflix, capable de lire nativement n'importe quel format vidéo sans transcodage côté serveur.
+🛠 1. Stack Technique Imposée
+Composant	Technologie	Rôle
+Frontend UI	Svelte + Tailwind CSS	Interface réactive, animations fluides (Netflix-like).
+Desktop Wrapper	Tauri v2	Application Windows native légère.
+Lecteur Vidéo	MPV (Sidecar)	Moteur de lecture universel (4K, HDR, ASS/SSA).
+Backend (Docker)	Bun + ElysiaJS	API haute performance et streaming de fichiers.
+Base de Données	SQLite + Drizzle ORM	Stockage local des métadonnées et des chemins.
+Metadata	TMDB API	Récupération automatique des affiches et synopsis.
+🏗 2. Architecture du Système
+
+    Le Serveur (Container Docker) :
+
+        Scanne les dossiers locaux (/movies, /series).
+
+        Identifie les fichiers via ffprobe.
+
+        Récupère les infos sur TMDB.
+
+        Expose une API REST pour le client.
+
+        Sert les fichiers vidéo via HTTP Range Requests (streaming brut).
+
+    Le Client (App Tauri) :
+
+        Affiche la bibliothèque avec un design épuré.
+
+        Communique avec le serveur pour récupérer le catalogue.
+
+        Lance MPV en mode fenêtré ou plein écran pour la lecture.
+
+✨ 3. Spécifications Fonctionnelles (MVP)
+A. Gestion des Médias (Serveur)
+
+    Scanning Automatique : Détection des nouveaux fichiers dans les dossiers surveillés.
+
+    Parsing de nom : Extraire le titre et l'année du nom de fichier pour l'associer à TMDB.
+
+    API de Streaming : Un endpoint capable d'envoyer le flux binaire de la vidéo vers MPV.
+
+B. Interface Utilisateur (Client Svelte)
+
+    Hero Section : Affichage du dernier film ajouté avec un "background video" ou une image large.
+
+    Carrousels : Catégories (Action, Comédie, Récents) avec défilement horizontal fluide.
+
+    Fiche Détail : Overlay avec synopsis, casting, note, et bouton "Play".
+
+    Recherche : Barre de recherche instantanée dans la bibliothèque locale.
+
+C. Lecture (MPV Integration)
+
+    Lancement natif : Au clic sur "Play", Tauri invoque le sidecar MPV.
+
+    Synchronisation : MPV doit recevoir l'URL du flux généré par le serveur Bun.
+
+    Reprise de lecture : (Optionnel) Sauvegarder le temps de lecture actuel dans la DB SQLite.
+
+🗄 4. Schéma de Données (Drizzle/SQLite)
+
+    Table Movies : id, title, tmdb_id, summary, poster_path, file_path, resolution, duration.
+
+    Table Settings : server_url, api_key, library_paths.

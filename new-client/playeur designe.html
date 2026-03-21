@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Aether Cinematic - Media Player</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;700;800&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface-bright": "#2c2c2c",
+                        "on-error": "#490013",
+                        "error-container": "#a70138",
+                        "on-surface-variant": "#adaaaa",
+                        "outline": "#777575",
+                        "surface": "#0e0e0e",
+                        "surface-container-highest": "#262626",
+                        "on-background": "#ffffff",
+                        "inverse-surface": "#fcf8f8",
+                        "primary-fixed": "#ff7668",
+                        "on-error-container": "#ffb2b9",
+                        "tertiary-fixed-dim": "#c68af3",
+                        "secondary-dim": "#f47789",
+                        "secondary-container": "#842136",
+                        "on-secondary-fixed-variant": "#912b3f",
+                        "on-tertiary-fixed-variant": "#54197f",
+                        "on-tertiary": "#4f127a",
+                        "secondary-fixed-dim": "#ffaeb6",
+                        "on-surface": "#ffffff",
+                        "tertiary-fixed": "#d398ff",
+                        "inverse-primary": "#c1000c",
+                        "surface-container-high": "#201f1f",
+                        "on-secondary-fixed": "#6a0b24",
+                        "primary": "#ff8e80",
+                        "on-primary": "#650003",
+                        "inverse-on-surface": "#565554",
+                        "secondary-fixed": "#ffc2c8",
+                        "primary-fixed-dim": "#ff5b4c",
+                        "primary-dim": "#e80f16",
+                        "background": "#0e0e0e",
+                        "primary-container": "#ff7668",
+                        "on-secondary-container": "#ffc0c6",
+                        "surface-container": "#1a1919",
+                        "tertiary": "#d7a0ff",
+                        "on-secondary": "#4d0016",
+                        "error-dim": "#d73357",
+                        "tertiary-container": "#cb8ff9",
+                        "surface-variant": "#262626",
+                        "on-tertiary-container": "#43006d",
+                        "tertiary-dim": "#c085ed",
+                        "surface-tint": "#ff8e80",
+                        "surface-dim": "#0e0e0e",
+                        "surface-container-lowest": "#000000",
+                        "error": "#ff6e84",
+                        "surface-container-low": "#131313",
+                        "on-primary-fixed-variant": "#610003",
+                        "on-primary-fixed": "#000000",
+                        "on-tertiary-fixed": "#290045",
+                        "secondary": "#f7798b",
+                        "outline-variant": "#494847",
+                        "on-primary-container": "#4f0002"
+                    },
+                    fontFamily: {
+                        "headline": ["Manrope"],
+                        "body": ["Inter"],
+                        "label": ["Inter"]
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+            display: inline-block;
+            line-height: 1;
+        }
+        .scrim-gradient {
+            background: linear-gradient(to top, rgba(14, 14, 14, 0.95) 0%, rgba(14, 14, 14, 0.4) 30%, transparent 60%, rgba(14, 14, 14, 0.4) 85%, rgba(14, 14, 14, 0.95) 100%);
+        }
+        .chapter-marker {
+            width: 2px;
+            height: 100%;
+            background-color: rgba(255, 255, 255, 0.4);
+            position: absolute;
+            top: 0;
+            z-index: 10;
+        }
+        .glass-panel {
+            backdrop-filter: blur(24px);
+            background: rgba(26, 25, 25, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .progress-hitbox:hover .progress-handle {
+            transform: scale(1.5);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body select-none overflow-hidden h-screen w-screen">
+<!-- Cinematic Background Video Frame -->
+<div class="relative w-full h-full bg-black">
+<img alt="Cinematic scifi background" class="absolute inset-0 w-full h-full object-cover opacity-60" data-alt="Cinematic science fiction landscape with deep blues and oranges" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAvDgfayUzm-dPywBBBgz8_13boyuBhssZt9CwIEaiZIia-Xsl5MhomIUI81cLjXnvP7-6mt6kWCqUo9oEGcLqmIusNjzhYzwWVceIsYSpSbOgnAtW42Cz9hv12ms6k28ba8YeCCd8h94P5JgvFDo4w132LA5oUogeQOTVgSRb6w8XY0S7nffj7OEJ4YipbBybVQYgNrmoqJPEDa6dXb2pR0xGyShAlcEl-Bsn77xrGIJmRhqfrf-fFueDeGjscAMEdR8g1CS6Ydu4"/>
+<!-- Scrim Overlay -->
+<div class="absolute inset-0 scrim-gradient"></div>
+<!-- Player Interface Container -->
+<div class="absolute inset-0 flex flex-col justify-between p-10 z-20">
+<!-- Top Controls -->
+<div class="flex justify-between items-start">
+<div class="flex flex-col gap-1.5">
+<span class="font-headline text-3xl font-extrabold tracking-tight text-white drop-shadow-lg">The Night Agent</span>
+<span class="font-body text-xs text-white/70 font-semibold uppercase tracking-[0.25em]">Season 2 • Episode 2 • "The Traitor"</span>
+</div>
+<div class="flex items-center gap-3">
+<button class="w-12 h-12 flex items-center justify-center rounded-full glass-panel hover:bg-white/15 transition-all active:scale-95" data-tooltip="Settings">
+<span class="material-symbols-outlined text-white text-2xl" data-icon="settings">settings</span>
+</button>
+<button class="w-12 h-12 flex items-center justify-center rounded-full glass-panel hover:bg-white/15 transition-all active:scale-95" data-tooltip="Close Player">
+<span class="material-symbols-outlined text-white text-2xl" data-icon="close">close</span>
+</button>
+</div>
+</div>
+<!-- Center Playback Controls -->
+<div class="flex items-center justify-center gap-12 sm:gap-16">
+<button class="flex items-center justify-center text-white/80 hover:text-white transition-all active:scale-90" title="Rewind 10s">
+<span class="material-symbols-outlined text-4xl" data-icon="replay_10">replay_10</span>
+</button>
+<button class="w-24 h-24 rounded-full bg-primary flex items-center justify-center shadow-[0_0_40px_rgba(255,142,128,0.3)] hover:scale-110 active:scale-95 transition-all group">
+<span class="material-symbols-outlined text-on-primary text-5xl ml-1.5 transition-transform" data-icon="play_arrow" style="font-variation-settings: 'FILL' 1;">play_arrow</span>
+</button>
+<button class="flex items-center justify-center text-white/80 hover:text-white transition-all active:scale-90" title="Forward 10s">
+<span class="material-symbols-outlined text-4xl" data-icon="forward_10">forward_10</span>
+</button>
+<button class="flex items-center justify-center text-white/80 hover:text-white transition-all active:scale-90" title="Next Episode">
+<span class="material-symbols-outlined text-4xl" data-icon="skip_next" style="font-variation-settings: 'FILL' 1;">skip_next</span>
+</button>
+</div>
+<!-- Bottom Control Shell -->
+<div class="flex flex-col gap-6 w-full max-w-7xl mx-auto">
+<!-- Subtitle Render Overlay -->
+<div class="flex justify-center mb-4 pointer-events-none">
+<p class="bg-black/60 backdrop-blur-md px-8 py-3 rounded-2xl text-2xl font-medium text-white tracking-wide border border-white/10 shadow-2xl">
+                    "We need to move. Now."
+                </p>
+</div>
+<!-- Progress Rail -->
+<div class="relative w-full group/progress progress-hitbox py-4 cursor-pointer">
+<div class="h-1.5 w-full bg-white/20 rounded-full overflow-hidden relative">
+<!-- Progress -->
+<div class="h-full bg-primary w-1/3 relative">
+</div>
+<!-- Chapter Markers -->
+<div class="chapter-marker left-[20%]"></div>
+<div class="chapter-marker left-[45%]"></div>
+<div class="chapter-marker left-[75%]"></div>
+</div>
+<!-- Handle -->
+<div class="progress-handle absolute top-1/2 left-1/3 -translate-y-1/2 -translate-x-1/2 w-4 h-4 bg-primary rounded-full shadow-[0_0_15px_rgba(255,142,128,0.8)] opacity-0 transition-all duration-200"></div>
+<!-- Hover Tooltip -->
+<div class="hidden group-hover/progress:flex absolute -top-8 left-1/3 -translate-x-1/2 px-2.5 py-1 bg-surface-container-high border border-white/10 rounded-md text-[11px] font-bold text-white shadow-xl">
+                    14:32
+                </div>
+</div>
+<!-- Bottom Navigation Bar -->
+<div class="flex items-center justify-between">
+<!-- Time & Volume -->
+<div class="flex items-center gap-8">
+<div class="flex items-baseline gap-2 font-body">
+<span class="text-white text-lg font-bold">14:32</span>
+<span class="text-white/50 text-sm font-medium">/ 42:00</span>
+</div>
+<div class="flex items-center gap-4 group/vol">
+<button class="text-white/80 hover:text-white transition-colors">
+<span class="material-symbols-outlined text-2xl" data-icon="volume_up">volume_up</span>
+</button>
+<div class="w-24 h-1 bg-white/20 rounded-full relative cursor-pointer overflow-hidden">
+<div class="h-full bg-white w-[80%]"></div>
+</div>
+</div>
+</div>
+<!-- Floating Central Nav (Netflix/Emby Style) -->
+<nav class="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 p-1.5 glass-panel rounded-full shadow-2xl">
+<button class="flex items-center gap-2 px-6 py-2.5 bg-primary text-on-primary rounded-full font-semibold text-sm transition-all shadow-lg active:scale-95">
+<span class="material-symbols-outlined text-xl" style="font-variation-settings: 'FILL' 1;">play_arrow</span>
+<span>PAUSE</span>
+</button>
+<button class="flex items-center gap-2 px-6 py-2.5 text-white/70 hover:text-white hover:bg-white/10 rounded-full font-semibold text-sm transition-all active:scale-95">
+<span class="material-symbols-outlined text-xl">format_list_bulleted</span>
+<span>EPISODES</span>
+</button>
+<button class="flex items-center gap-2 px-6 py-2.5 text-white/70 hover:text-white hover:bg-white/10 rounded-full font-semibold text-sm transition-all active:scale-95">
+<span class="material-symbols-outlined text-xl">subtitles</span>
+<span>SUBTITLES</span>
+</button>
+<button class="flex items-center gap-2 px-6 py-2.5 text-white/70 hover:text-white hover:bg-white/10 rounded-full font-semibold text-sm transition-all active:scale-95">
+<span class="material-symbols-outlined text-xl">volume_up</span>
+<span>AUDIO</span>
+</button>
+</nav>
+<!-- Actions -->
+<div class="flex items-center gap-4">
+<button class="w-10 h-10 flex items-center justify-center rounded-full text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-90" title="PiP Mode">
+<span class="material-symbols-outlined text-2xl" data-icon="picture_in_picture_alt">picture_in_picture_alt</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center rounded-full text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-90" title="Full Screen">
+<span class="material-symbols-outlined text-2xl" data-icon="fullscreen">fullscreen</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+</body></html>

@@ -1,0 +1,14 @@
+services:
+  server:
+    build: .
+    container_name: myflix-server
+    restart: unless-stopped
+    ports:
+      - "3089:3000"
+    volumes:
+      - ./src:/app/src # Mount source code for live updates
+      - ./movies:/app/movies  # Mount your host movies directory here
+      - ./tvshows:/app/tvshows # Mount your host TV shows directory here
+      - ./data:/app/data # Persist the database
+    environment:
+      - NODE_ENV=production

@@ -1,0 +1,16 @@
+services:
+  server:
+    image: ghcr.io/tsuky44/myflix-server:latest
+    container_name: myflix-server
+    restart: unless-stopped
+    ports:
+      - "3089:3000"
+    volumes:
+      # Chemin vers vos films sur le serveur
+      - /mnt/user/Bibliotheque/Film:/app/movies
+      
+      # Persistance de la base de données
+      - ./myflix_data:/app/data
+
+    environment:
+      - NODE_ENV=production
