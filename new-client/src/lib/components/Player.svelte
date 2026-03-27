@@ -6,11 +6,13 @@
     import { getCurrentWindow } from '@tauri-apps/api/window';
     import { invoke } from '@tauri-apps/api/core';
     import { player, closePlayer, openPlayer } from '$lib/stores/player';
+    import { startSync, stopSync, updateSyncTime, sendPause } from '$lib/ws';
     
     export let streamUrl: string;
     export let title: string | null = "Unknown";
     export let movieId: number | null = null;
     export let apiUrl: string = "http://localhost:3000";
+    export let resumeTime: number = 0;
     
     let isReady = false;
     let isHovering = false;
@@ -46,7 +48,20 @@
     let unlistenTime: () => void;
     let unlistenDuration: () => void;
     let unlistenTracks: () => void;
+    let unlistenBuffering: () => void;
+    let unlistenIdle: () => void;
+    let unlistenCacheTime: () => void;
     let interval: any;
+    
+    // External subtitles
+    let externalSubs: Array<{ filename: string, lang: string, dir: string }> = [];
+    
+    // Network error state
+    let networkError = false;
+    let retryCount = 0;
+
+    // Buffer/cache time (for YouTube-style buffered bar)
+    let cacheTime = 0;
 
     // Episode Context (for TV Shows)
     let episodeContext: { next: any, prev: any, current: any, show_title: string } | null = null;
@@ -127,7 +142,12 @@
         episodeContext = null;
         
         try {
-            await command('loadfile', [streamUrl]);
+            // Restart WS sync for the new episode
+            stopSync();
+            startSync(newId, true);
+            
+            await invoke('mpv_load_file', { url: streamUrl, startTime: 0 });
+            await enforceSubtitleBottom();
             await setProperty('pause', false);
             openPlayer(newUrl, newTitle, newId);
             
@@ -170,7 +190,12 @@
         episodeContext = null;
         
         try {
-            await command('loadfile', [streamUrl]);
+            // Restart WS sync for the new episode
+            stopSync();
+            startSync(newId, true);
+            
+            await invoke('mpv_load_file', { url: streamUrl, startTime: 0 });
+            await enforceSubtitleBottom();
             await setProperty('pause', false);
             openPlayer(newUrl, newTitle, newId);
             
@@ -206,23 +231,15 @@
     // Timeline Interaction
     async function seekTo(newTime: number) {
         try {
+            cacheTime = newTime;
             if (quality === 'direct') {
                 await setProperty('time-pos', newTime);
-                position = newTime;
             } else {
-                // Transcoding seek
-                console.log(`[SEEK] Transcoding seek to ${newTime}s`);
-                isLoading = true;
                 transcodeOffset = newTime;
-                position = 0; // Reset MPV's internal time
-                
-                const newUrl = `${apiUrl}/transcode/${movieId}?quality=${quality}&start=${Math.floor(newTime)}`;
-                await command('loadfile', [newUrl]);
-                
-                // Attendre un peu que le flux démarre
-                setTimeout(() => {
-                    isLoading = false;
-                }, 2000);
+                position = 0;
+                const url = buildTranscodeUrl(quality, newTime);
+                await invoke('mpv_load_file', { url, startTime: 0 });
+                await enforceSubtitleBottom();
             }
         } catch (e) {
             console.error("Seek Error:", e);
@@ -296,36 +313,48 @@
         toggleFullscreen();
     }
 
-    async function setTrack(type: 'sid' | 'aid', mpvId: string, trackId: number | string) {
+    function buildTranscodeUrl(targetQuality: string, startTime: number): string {
+        const typeParam = isEpisode ? '&type=episode' : '';
+        return `${apiUrl}/transcode/${movieId}?quality=${targetQuality}&start=${Math.floor(startTime)}${typeParam}`;
+    }
+
+    async function enforceSubtitleBottom() {
         try {
-            console.log(`Envoi de la commande à Rust : type=${type}, id=${mpvId} (File ID ${trackId})`);
-            
-            try {
-                await invoke('set_mpv_track', { trackType: type, trackId: mpvId });
-            } catch (err) {
-                console.warn(`invoke set_mpv_track failed:`, err);
-                try {
-                    await command('set', [type, mpvId]);
-                } catch (e2) {
-                    console.warn(`Fallback command also failed.`);
+            await setProperty('sub-pos', 95);
+            await setProperty('sub-use-margins', 'yes');
+            await setProperty('sub-ass-force-margins', 'yes');
+            await setProperty('sub-ass-override', 'force');
+            await setProperty('sub-ass-style-overrides', 'Alignment=2,MarginV=28');
+        } catch (e) {
+            console.warn('[SUBS] Failed to enforce bottom position:', e);
+        }
+    }
+
+    async function setTrack(type: 'sid' | 'aid', mpvId: string, trackId: number | string) {
+        // Optimistic UI update — instant visual feedback
+        mediaTracks = mediaTracks.map(track => {
+            if ((type === 'sid' && track.type === 'sub') || (type === 'aid' && track.type === 'audio')) {
+                if (mpvId === 'no') {
+                    track.selected = false;
+                } else {
+                    track.selected = track.id.toString() === trackId.toString();
                 }
             }
-            
-            await new Promise(r => setTimeout(r, 100));
-            
-            mediaTracks = mediaTracks.map(track => {
-                if ((type === 'sid' && track.type === 'sub') || (type === 'aid' && track.type === 'audio')) {
-                    if (mpvId === 'no') {
-                        track.selected = false;
-                    } else {
-                        track.selected = track.id.toString() === trackId.toString();
-                    }
-                }
-                return track;
-            });
-            console.log("Piste changée avec succès !");
-        } catch (e) {
-            console.error(`Erreur Tauri lors du changement de ${type}:`, e);
+            return track;
+        });
+        
+        // Send command to MPV (no artificial delay)
+        try {
+            await invoke('set_mpv_track', { trackType: type, trackId: mpvId });
+        } catch (err) {
+            console.warn(`set_mpv_track failed, trying fallback:`, err);
+            try { await command('set', [type, mpvId]); } catch (e2) {
+                console.error(`Track switch failed completely for ${type}=${mpvId}`);
+            }
+        }
+
+        if (type === 'sid') {
+            await enforceSubtitleBottom();
         }
     }
 
@@ -344,18 +373,48 @@
             
             let loadUrl = streamUrl;
             if (newQuality !== 'direct') {
-                loadUrl = `${apiUrl}/transcode/${movieId}?quality=${newQuality}&start=${Math.floor(currentTimeToSeek)}`;
+                loadUrl = buildTranscodeUrl(newQuality, currentTimeToSeek);
             }
             
             await command('loadfile', [loadUrl]);
-            
-            setTimeout(() => {
-                isLoading = false;
-            }, 2000);
+            await enforceSubtitleBottom();
+            // isLoading will be set to false by the mpv-buffering event
             
         } catch (e) {
             console.error("Quality change error:", e);
             isLoading = false;
+        }
+    }
+    
+    async function loadExternalSubtitle(sub: { filename: string, lang: string, dir: string }) {
+        try {
+            const subUrl = `${apiUrl}/subtitles/${encodeURIComponent(sub.filename)}?dir=${encodeURIComponent(sub.dir)}`;
+            await invoke('mpv_add_subtitle', { subUrl });
+            console.log(`[SUBS] Loaded external subtitle: ${sub.filename}`);
+        } catch (e) {
+            console.error(`[SUBS] Failed to load external subtitle:`, e);
+        }
+    }
+    
+    async function retryPlayback() {
+        networkError = false;
+        retryCount++;
+        isLoading = true;
+        try {
+            if (quality === 'direct') {
+                await invoke('mpv_load_file', { url: streamUrl, startTime: Math.floor(displayPosition) });
+                await enforceSubtitleBottom();
+            } else {
+                const url = buildTranscodeUrl(quality, displayPosition);
+                transcodeOffset = displayPosition;
+                position = 0;
+                await invoke('mpv_load_file', { url, startTime: 0 });
+                await enforceSubtitleBottom();
+            }
+            await setProperty('pause', false);
+        } catch (e) {
+            console.error('[RETRY] Failed:', e);
+            networkError = true;
         }
     }
 
@@ -386,24 +445,42 @@
                     'keep-open': 'yes',
                     'force-window': 'yes',
                     'ontop': 'yes',
+                    // ── Cache & Buffering (optimisé pour connexions lentes) ──
                     'cache': 'yes',
-                    'cache-pause': 'no', 
-                    'demuxer-max-bytes': '500MiB', // Augmenté pour stocker plus de vidéo et les gros sous-titres en RAM
-                    'demuxer-readahead-secs': '60', // Permet de lire plus loin en avance
-                    'demuxer-max-back-bytes': '150MiB', // Garde plus de données en arrière pour éviter de recharger
-                    'network-timeout': '120',
-                    'sub-auto': 'all', 
+                    'cache-pause': 'yes',                    // Pause proprement quand le buffer est vide (au lieu de stutterer)
+                    'cache-pause-wait': '2',                 // Reprend après 2s de données en cache
+                    'cache-pause-initial': 'yes',            // Bufferise avant de démarrer la lecture
+                    'demuxer-max-bytes': '150MiB',           // Buffer raisonnable (pas 500MB)
+                    'demuxer-readahead-secs': '30',          // 30s d'avance au lieu de 60 (moins de pression réseau)
+                    'demuxer-max-back-bytes': '50MiB',       // Réduire le cache arrière
+                    'network-timeout': '60',
+                    // ── Sous-titres ──
+                    'sub-auto': 'all',
                     'subs-with-matching-audio': 'no',
-                    'demuxer-mkv-subtitle-preroll': 'yes',
-                    'sub-ass-override': 'scale',
+                    'demuxer-mkv-subtitle-preroll': 'index', // Utilise l'index MKV (quasi instantané) au lieu de re-lire tout le fichier
+                    'demuxer-mkv-subtitle-preroll-secs': '1',// Limite le preroll à 1s max
+                    'sub-ass-override': 'force',
+                    'sub-ass-style-overrides': 'Alignment=2,MarginV=28',
+                    'sub-pos': '95',                         // Position verticale des sous-titres (bas de l'écran)
+                    'sub-use-margins': 'yes',
+                    'sub-ass-force-margins': 'yes',
+                    'sid': 'auto',                           // Sélection automatique rapide
+                    // ── Performance réseau ──
+                    'stream-buffer-size': '512KiB',          // Taille des lectures réseau individuelles
                 }
             });
             
             isReady = true;
+            
+            // Tell Rust to start polling MPV properties
+            try { await invoke('start_mpv_polling'); } catch (e) { console.warn('start_mpv_polling not available:', e); }
+            
             if (streamUrl) {
-                console.log(`Loading: ${streamUrl}`);
-                await command('loadfile', [streamUrl]);
-                await setProperty('pause', false); 
+                console.log(`[PLAYER] Loading: ${streamUrl} | resume: ${resumeTime}s`);
+                isLoading = true;
+                await invoke('mpv_load_file', { url: streamUrl, startTime: resumeTime });
+                await enforceSubtitleBottom();
+                await setProperty('pause', false);
             }
             
             try {
@@ -435,6 +512,7 @@
                         console.log("Info from ffprobe API:", info);
                         mediaTracks = info.tracks || [];
                         chapters = info.chapters || [];
+                        externalSubs = info.externalSubs || [];
                         if (info.duration && info.duration > 0) {
                             originalDuration = info.duration;
                             duration = info.duration;
@@ -447,8 +525,18 @@
 
             console.log("Setting up MPV event listeners...");
             
+            // Start WebSocket sync for progress saving
+            if (movieId) {
+                startSync(movieId, isEpisode);
+            }
+
             unlistenTime = await listen<number>('mpv-time-update', (event) => {
                 position = event.payload;
+                if (isLoading && event.payload > 0) {
+                    isLoading = false;
+                }
+                const realPos = quality === 'direct' ? event.payload : transcodeOffset + event.payload;
+                updateSyncTime(realPos);
             });
             
             unlistenDuration = await listen<number>('mpv-duration', (event) => {
@@ -459,9 +547,34 @@
                 if (quality === 'direct' && (originalDuration === 0 || Math.abs(event.payload - originalDuration) < originalDuration * 0.2)) {
                     duration = event.payload;
                 }
+
             });
 
             unlistenTracks = await listen<any[]>('mpv-tracks-update', (event) => {});
+            
+            // Listen for buffering state from Rust
+            unlistenBuffering = await listen<boolean>('mpv-buffering', (event) => {
+                if (event.payload) {
+                    isLoading = true;
+                } else {
+                    isLoading = false;
+                }
+            });
+            
+            // Listen for MPV idle (end of file or error)
+            unlistenIdle = await listen<boolean>('mpv-idle', (event) => {
+                if (event.payload && isReady && !isPaused) {
+                    console.warn('[PLAYER] MPV went idle unexpectedly — possible network error or EOF');
+                    // If we're near the end of the file, this is normal EOF
+                    if (displayDuration > 0 && displayPosition < displayDuration - 10) {
+                        networkError = true;
+                    } else if (displayPosition > 0) {
+                        // Likely a network error
+                        networkError = true;
+                        isLoading = false;
+                    }
+                }
+            });
 
             interval = setInterval(async () => {
                 if (!isReady) return;
@@ -469,7 +582,19 @@
                     const pauseState = await getProperty('pause');
                     isPaused = pauseState === true;
                 } catch (e) {}
-            }, 1500); 
+            }, 1500);
+
+            // Listen for cache time updates (buffered data ahead) - for YouTube-style buffered bar
+            unlistenCacheTime = await listen<number>('mpv-cache-time', (event) => {
+                cacheTime = event.payload;
+            });
+            
+            // Load external subtitles if any
+            if (externalSubs.length > 0) {
+                for (const sub of externalSubs) {
+                    await loadExternalSubtitle(sub);
+                }
+            } 
 
         } catch (e) {
             console.error("MPV Init Failed:", e);
@@ -477,10 +602,20 @@
     });
 
     onDestroy(async () => {
+        // Stop WebSocket sync (sends final progress)
+        stopSync();
+        cancelAutoPlay();
+        
+        // Stop Rust polling thread
+        try { await invoke('stop_mpv_polling'); } catch (e) {}
+        
         if (interval) clearInterval(interval);
         if (unlistenTime) unlistenTime();
         if (unlistenDuration) unlistenDuration();
         if (unlistenTracks) unlistenTracks();
+        if (unlistenBuffering) unlistenBuffering();
+        if (unlistenIdle) unlistenIdle();
+        if (unlistenCacheTime) unlistenCacheTime();
 
         try {
             await command('stop', []);
@@ -494,6 +629,7 @@
             const newPauseState = !isPaused;
             await setProperty('pause', newPauseState);
             isPaused = newPauseState;
+            if (newPauseState) sendPause();
         } catch (e) {
             console.error("Toggle Play Error:", e);
         }
@@ -531,13 +667,41 @@
         tabindex="0"
     ></div>
 
+    <!-- Loading Spinner Overlay -->
+    {#if isLoading && !networkError}
+    <div class="absolute inset-0 z-30 flex items-center justify-center pointer-events-none" transition:fade={{ duration: 200 }}>
+        <div class="w-16 h-16 border-4 border-white/20 border-t-primary rounded-full animate-spin"></div>
+    </div>
+    {/if}
+
+    <!-- Network Error Overlay -->
+    {#if networkError}
+    <div class="absolute inset-0 z-40 flex flex-col items-center justify-center bg-black/70 pointer-events-auto" transition:fade={{ duration: 300 }}>
+        <span class="material-symbols-outlined text-red-400 text-6xl mb-4">wifi_off</span>
+        <h2 class="text-white text-2xl font-bold mb-2">Erreur de connexion</h2>
+        <p class="text-white/60 text-sm mb-6">La lecture a été interrompue. Vérifiez votre connexion réseau.</p>
+        <div class="flex gap-4">
+            <button on:click={retryPlayback} class="bg-primary hover:bg-primary/80 text-white px-8 py-3 rounded-xl font-bold flex items-center gap-2 transition-all hover:scale-105 shadow-lg">
+                <span class="material-symbols-outlined">refresh</span>
+                Réessayer
+            </button>
+            <button on:click={stop} class="bg-white/10 hover:bg-white/20 text-white px-8 py-3 rounded-xl font-bold transition-all">
+                Fermer
+            </button>
+        </div>
+        {#if retryCount > 0}
+            <p class="text-white/40 text-xs mt-4">Tentative {retryCount}</p>
+        {/if}
+    </div>
+    {/if}
+
     <!-- Scrim Overlay -->
     {#if showControls}
     <div class="absolute inset-0 scrim-gradient z-10 pointer-events-none" transition:fade></div>
     {/if}
 
     <!-- Player Interface Container -->
-    <div class="absolute inset-0 flex flex-col justify-between p-10 z-20 pointer-events-none">
+    <div class="absolute inset-0 flex flex-col justify-between px-4 sm:px-8 lg:px-12 2xl:px-16 py-6 sm:py-8 z-20 pointer-events-none">
         
         <!-- Top Controls -->
         <div class="flex justify-between items-start pointer-events-auto transition-opacity duration-300" class:opacity-0={!showControls}>
@@ -588,7 +752,7 @@
         </div>
 
         <!-- Bottom Control Shell -->
-        <div class="flex flex-col gap-6 w-full max-w-7xl mx-auto">
+        <div class="flex flex-col gap-6 w-full">
             
             <!-- Skip Intro / Outro Buttons -->
             <!-- Placed relatively above the controls so they don't block interaction -->
@@ -629,8 +793,10 @@
                 <!-- Progress Rail -->
                 <div class="relative w-full group/progress progress-hitbox py-4 cursor-pointer" on:click={handleSeek}>
                     <div class="h-1.5 w-full bg-white/20 rounded-full overflow-hidden relative">
-                        <!-- Progress -->
-                        <div class="h-full bg-primary relative" style="width: {(displayDuration > 0 ? (displayPosition / displayDuration) * 100 : 0)}%"></div>
+                        <!-- Buffered progress (YouTube style) - shows how much is loaded from start -->
+                        <div class="absolute h-full bg-white/30 rounded-full" style="left: 0%; width: {(displayDuration > 0 && cacheTime > 0 ? Math.min((cacheTime / displayDuration) * 100, 100) : 0)}%;"></div>
+                        <!-- Progress (colored) overlays on top -->
+                        <div class="h-full bg-primary relative z-10" style="width: {(displayDuration > 0 ? (displayPosition / displayDuration) * 100 : 0)}%;"></div>
                         <!-- Chapter Markers -->
                         {#each chapters as chapter}
                             {#if displayDuration > 0}
@@ -693,6 +859,16 @@
                                         {#each subTracks as track, i}
                                             <button class="text-left px-4 py-2 rounded-md text-sm transition-colors {track.selected ? 'text-primary font-semibold' : 'text-white/70 hover:bg-white/10'}" on:click={() => { setTrack('sid', (i + 1).toString(), track.id); activeMenu = null; }}>{track.title || track.lang || `Piste ${i + 1}`}</button>
                                         {/each}
+                                        {#if externalSubs.length > 0}
+                                            <div class="border-t border-white/10 my-2"></div>
+                                            <h4 class="text-white/40 text-xs uppercase font-bold tracking-wider px-2 mb-1">Externes</h4>
+                                            {#each externalSubs as sub}
+                                                <button class="text-left px-4 py-2 rounded-md text-sm text-white/70 hover:bg-white/10 transition-colors flex items-center gap-2" on:click={() => { loadExternalSubtitle(sub); activeMenu = null; }}>
+                                                    <span class="material-symbols-outlined text-xs opacity-50">file_open</span>
+                                                    {sub.lang !== 'und' ? sub.lang : sub.filename}
+                                                </button>
+                                            {/each}
+                                        {/if}
                                     </div>
                                 </div>
                             {/if}
@@ -739,6 +915,7 @@
                                         <button class="text-left px-4 py-2 rounded-md text-sm transition-colors {quality === '720p_low' ? 'text-primary font-semibold' : 'text-white/70 hover:bg-white/10'}" on:click={() => { changeQuality('720p_low'); activeMenu = null; }}>720p (1.5 Mbps)</button>
                                         <div class="h-px bg-white/10 my-1"></div>
                                         <button class="text-left px-4 py-2 rounded-md text-sm transition-colors {quality === '480p' ? 'text-primary font-semibold' : 'text-white/70 hover:bg-white/10'}" on:click={() => { changeQuality('480p'); activeMenu = null; }}>480p (800 kbps)</button>
+                                        <button class="text-left px-4 py-2 rounded-md text-sm transition-colors {quality === '360p' ? 'text-primary font-semibold' : 'text-white/70 hover:bg-white/10'}" on:click={() => { changeQuality('360p'); activeMenu = null; }}>360p (400 kbps)</button>
                                     </div>
                                 </div>
                             {/if}

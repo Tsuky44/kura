@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { getPosterUrl } from '$lib/api';
+  import { getPosterUrl, getStreamUrl } from '$lib/api';
   import { playMedia } from '$lib/stores/player';
   import { Play } from 'lucide-svelte';
 
   export let movie: any;
   
   function play() {
-      // Direct play
-      playMedia(movie, `http://192.168.1.123:3089/stream/${movie.id}`);
+      playMedia(movie, getStreamUrl(movie.id));
   }
 </script>
 

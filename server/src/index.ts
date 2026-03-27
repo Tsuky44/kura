@@ -3,9 +3,37 @@ import { cors } from '@elysiajs/cors';
 import { db } from './db';
 import { movies, tv_shows, tv_seasons, tv_episodes } from './db/schema';
 import { scanMovies, scanTVShows } from './services/scanner';
-import { eq } from 'drizzle-orm';
-import { join } from 'node:path';
+import { eq, desc, or, gt } from 'drizzle-orm';
+import { join, parse as pathParse, dirname } from 'node:path';
 import { sql } from 'drizzle-orm';
+import { readdir } from 'node:fs/promises';
+
+// ── Streaming session tracking (Adaptive Chunking) ──
+const streamSessions = new Map<string, { lastStart: number, lastEnd: number, time: number, requests: number }>();
+
+// Chunk ramp-up tiers: start small, grow gradually
+const CHUNK_TIERS = [
+    2  * 1024 * 1024,  // Tier 0: 2MB  (first request / after seek)
+    5  * 1024 * 1024,  // Tier 1: 5MB  (2nd sequential request)
+    10 * 1024 * 1024,  // Tier 2: 10MB (3rd+)
+    25 * 1024 * 1024,  // Tier 3: 25MB (cruise — cap)
+];
+
+// Clean up stale sessions every 30s
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, session] of streamSessions.entries()) {
+        if (now - session.time > 120000) {
+            streamSessions.delete(key);
+        }
+    }
+}, 30000);
+
+// ── Scan mutex ──
+let isScanning = false;
+
+// ── Subtitle file extensions ──
+const SUBTITLE_EXTENSIONS = ['.srt', '.ass', '.ssa', '.sub', '.vtt'];
 
 // Ensure table exists (simple migration for MVP)
 try {
@@ -127,15 +155,91 @@ const app = new Elysia()
   .get('/', () => {
     return "MyFlix Server is running! 🍿";
   })
-  .get('/scan', async () => {
+  .get('/scan', async ({ set }) => {
+    if (isScanning) {
+        set.status = 429;
+        return { success: false, message: 'A scan is already in progress' };
+    }
+    
     const movieDir = join(process.cwd(), 'movies');
     const tvDir = join(process.cwd(), 'tvshows');
     
-    // Non-blocking scan
-    scanMovies(movieDir).catch(e => console.error("Movie scan failed:", e));
-    scanTVShows(tvDir).catch(e => console.error("TV scan failed:", e));
+    isScanning = true;
+    
+    // Non-blocking scan with mutex release
+    Promise.all([
+        scanMovies(movieDir).catch(e => console.error("Movie scan failed:", e)),
+        scanTVShows(tvDir).catch(e => console.error("TV scan failed:", e))
+    ]).finally(() => {
+        isScanning = false;
+        console.log('[SCAN] Scan completed.');
+    });
     
     return { success: true, message: 'Scan started in background', directories: [movieDir, tvDir] };
+  })
+  .get('/continue-watching', async () => {
+    // Movies with progress > 0, sorted by last_watched desc
+    const recentMovies = await db.select().from(movies)
+        .where(gt(movies.progress, 0))
+        .orderBy(desc(movies.last_watched))
+        .limit(20)
+        .all();
+    
+    // Episodes with progress > 0, sorted by last_watched desc
+    // Fetch more than needed so we can deduplicate by show
+    const recentEpisodes = await db.select().from(tv_episodes)
+        .where(gt(tv_episodes.progress, 0))
+        .orderBy(desc(tv_episodes.last_watched))
+        .limit(100)
+        .all();
+    
+    // Enrich episodes with show info
+    const enrichedEpisodes = await Promise.all(recentEpisodes.map(async (ep) => {
+        const show = await db.select().from(tv_shows).where(eq(tv_shows.id, ep.show_id)).get();
+        const season = await db.select().from(tv_seasons).where(eq(tv_seasons.id, ep.season_id)).get();
+        return {
+            ...ep,
+            show_title: show?.title || 'Unknown',
+            show_poster: show?.poster_path || null,
+            season_number: season?.season_number || 0,
+            type: 'episode' as const
+        };
+    }));
+
+    // Deduplicate: keep only the most recently watched episode per show
+    // (episodes are already sorted by last_watched DESC, so first occurrence = most recent)
+    const seenShows = new Set<number>();
+    const deduplicatedEpisodes = enrichedEpisodes.filter(ep => {
+        if (seenShows.has(ep.show_id)) return false;
+        seenShows.add(ep.show_id);
+        return true;
+    });
+    
+    // Merge and sort by last_watched
+    const all = [
+        ...recentMovies.map(m => ({ ...m, type: 'movie' as const })),
+        ...deduplicatedEpisodes
+    ].sort((a, b) => {
+        const aTime = a.last_watched ? new Date(a.last_watched).getTime() : 0;
+        const bTime = b.last_watched ? new Date(b.last_watched).getTime() : 0;
+        return bTime - aTime;
+    });
+    
+    return all.slice(0, 20);
+  })
+  .get('/tmdb/movie/:tmdbId', async ({ params: { tmdbId }, set }) => {
+    const TMDB_API_KEY = '7f43cb4adbc635ccad5c04412b284d34';
+    try {
+        const res = await fetch(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&language=fr-FR&append_to_response=credits,videos,release_dates,recommendations,similar`);
+        if (!res.ok) {
+            set.status = res.status;
+            return { error: 'TMDB request failed' };
+        }
+        return await res.json();
+    } catch (e: any) {
+        set.status = 500;
+        return { error: 'TMDB proxy error', details: e.message };
+    }
   })
   .get('/movies', async () => {
     return await db.select().from(movies).all();
@@ -225,7 +329,7 @@ const app = new Elysia()
       let prevEpisode = null;
       
       if (currentIndex > 0) {
-          const prev = episodesWithSeasonNum[currentIndex - 1];
+          const prev = episodesWithSeasonNum[currentIndex - 1]!;
           prevEpisode = {
               id: prev.id,
               title: prev.title,
@@ -235,7 +339,7 @@ const app = new Elysia()
       }
       
       if (currentIndex < episodesWithSeasonNum.length - 1) {
-          const next = episodesWithSeasonNum[currentIndex + 1];
+          const next = episodesWithSeasonNum[currentIndex + 1]!;
           nextEpisode = {
               id: next.id,
               title: next.title,
@@ -281,7 +385,7 @@ const app = new Elysia()
     set.headers["Content-Type"] = file.type || "video/mp4";
     set.headers["Content-Length"] = String(file.size);
   })
-  .get('/movies/:id/tracks', async ({ params: { id }, query, set }) => {
+  .get('/media/:id/tracks', async ({ params: { id }, query, set }) => {
     const isEpisode = query.type === 'episode';
     let media;
     
@@ -299,13 +403,21 @@ const app = new Elysia()
     try {
         const path = media.file_path;
         
-        // Execute ffprobe
+        // Execute ffprobe with timeout (10s)
         const proc = Bun.spawn(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path]);
-        const text = await new Response(proc.stdout).text();
+        
+        const timeoutPromise = new Promise<never>((_, reject) => 
+            setTimeout(() => { proc.kill(); reject(new Error('ffprobe timeout after 10s')); }, 10000)
+        );
+        
+        const text = await Promise.race([
+            new Response(proc.stdout).text(),
+            timeoutPromise
+        ]);
         const data = JSON.parse(text);
 
         if (!data.streams) {
-            return [];
+            return { duration: 0, tracks: [], chapters: [], externalSubs: [] };
         }
 
         const tracks = data.streams
@@ -314,16 +426,15 @@ const app = new Elysia()
                 const isSub = s.codec_type === 'subtitle';
                 
                 return {
-                    id: s.index, // ID unique absolu pour la clé
+                    id: s.index,
                     type: isSub ? 'sub' : s.codec_type,
                     lang: s.tags?.language || s.tags?.LANGUAGE || 'und',
                     title: s.tags?.title || s.tags?.TITLE || '',
                     codec: s.codec_name,
-                    selected: false // Managed by frontend
+                    selected: false
                 };
             });
 
-        // Extraction des chapitres pour la détection d'intro
         const chapters = (data.chapters || []).map((c: any) => ({
             id: c.id,
             start_time: parseFloat(c.start_time),
@@ -331,19 +442,86 @@ const app = new Elysia()
             title: c.tags?.title || c.tags?.TITLE || `Chapter ${c.id}`
         }));
 
-        // Extraire la durée totale du fichier
         const duration = data.format?.duration ? parseFloat(data.format.duration) : 0;
 
+        // Scan for external subtitle files adjacent to the video
+        const externalSubs = await findExternalSubtitles(path);
+
         return {
-            duration: duration,
-            tracks: tracks,
-            chapters: chapters
+            duration,
+            tracks,
+            chapters,
+            externalSubs
         };
     } catch (e: any) {
         console.error(`[FFPROBE] Error reading tracks for ID ${id}:`, e);
         set.status = 500;
         return { error: 'Failed to extract tracks', details: e.message };
     }
+  })
+  // Keep old route as alias for backward compatibility
+  .get('/movies/:id/tracks', async ({ params: { id }, query, set }) => {
+    // Redirect to the canonical route
+    const isEpisode = query.type === 'episode';
+    let media;
+    if (isEpisode) {
+        media = await db.select().from(tv_episodes).where(eq(tv_episodes.id, parseInt(id))).get();
+    } else {
+        media = await db.select().from(movies).where(eq(movies.id, parseInt(id))).get();
+    }
+    if (!media) { set.status = 404; return { error: 'Media not found' }; }
+
+    try {
+        const path = media.file_path;
+        const proc = Bun.spawn(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path]);
+        const timeoutPromise = new Promise<never>((_, reject) => 
+            setTimeout(() => { proc.kill(); reject(new Error('ffprobe timeout')); }, 10000)
+        );
+        const text = await Promise.race([new Response(proc.stdout).text(), timeoutPromise]);
+        const data = JSON.parse(text);
+        if (!data.streams) return { duration: 0, tracks: [], chapters: [], externalSubs: [] };
+        const tracks = data.streams.filter((s: any) => s.codec_type === 'subtitle' || s.codec_type === 'audio').map((s: any) => ({
+            id: s.index, type: s.codec_type === 'subtitle' ? 'sub' : s.codec_type,
+            lang: s.tags?.language || s.tags?.LANGUAGE || 'und',
+            title: s.tags?.title || s.tags?.TITLE || '', codec: s.codec_name, selected: false
+        }));
+        const chapters = (data.chapters || []).map((c: any) => ({ id: c.id, start_time: parseFloat(c.start_time), end_time: parseFloat(c.end_time), title: c.tags?.title || c.tags?.TITLE || `Chapter ${c.id}` }));
+        const duration = data.format?.duration ? parseFloat(data.format.duration) : 0;
+        const externalSubs = await findExternalSubtitles(path);
+        return { duration, tracks, chapters, externalSubs };
+    } catch (e: any) {
+        set.status = 500;
+        return { error: 'Failed to extract tracks', details: e.message };
+    }
+  })
+  .get('/subtitles/:filename', async ({ params: { filename }, query, set }) => {
+    // Serve an external subtitle file by providing the directory path and filename
+    const dir = query.dir;
+    if (!dir) {
+        set.status = 400;
+        return 'Missing dir parameter';
+    }
+    
+    const filePath = join(dir, filename);
+    const file = Bun.file(filePath);
+    
+    if (!await file.exists()) {
+        set.status = 404;
+        return 'Subtitle file not found';
+    }
+    
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    const mimeTypes: Record<string, string> = {
+        'srt': 'text/srt',
+        'ass': 'text/x-ssa',
+        'ssa': 'text/x-ssa',
+        'vtt': 'text/vtt',
+        'sub': 'text/plain'
+    };
+    
+    set.headers['Content-Type'] = mimeTypes[ext || ''] || 'text/plain';
+    set.headers['Access-Control-Allow-Origin'] = '*';
+    return file;
   })
   .get('/stream/:id', async ({ request, params: { id }, query, headers, set }) => {
     const isEpisode = query.type === 'episode';
@@ -421,6 +599,9 @@ const app = new Elysia()
     let maxrate = "8M"; // Bitrate maximum
     let bufsize = "16M"; // Taille du buffer pour le contrôle du bitrate
 
+    let audioCodec = "copy";  // Par défaut on copie l'audio
+    let audioBitrate = "";
+
     switch(quality) {
         case "1080p_high": // ~ 8 Mbps (Excellente qualité 1080p)
             scale = "-2:1080"; crf = "21"; maxrate = "8M"; bufsize = "16M"; break;
@@ -433,31 +614,41 @@ const app = new Elysia()
         case "720p_low": // ~ 1.5 Mbps (720p très compressé)
             scale = "-2:720"; crf = "28"; maxrate = "1.5M"; bufsize = "3M"; break;
         case "480p": // ~ 800 kbps (Qualité DVD / Mobile)
-            scale = "-2:480"; crf = "30"; maxrate = "800k"; bufsize = "1.5M"; break;
+            scale = "-2:480"; crf = "30"; maxrate = "800k"; bufsize = "1.5M";
+            audioCodec = "aac"; audioBitrate = "128k"; break;
+        case "360p": // ~ 400 kbps (Connexion très lente)
+            scale = "-2:360"; crf = "32"; maxrate = "400k"; bufsize = "800k";
+            audioCodec = "aac"; audioBitrate = "96k"; break;
         default:
             scale = "-2:1080"; crf = "24"; maxrate = "4M"; bufsize = "8M"; break;
     }
 
-    // FFmpeg command specifically crafted to scale video but COPY audio and subtitles
+    // Build audio args based on whether we copy or transcode
+    const audioArgs = audioCodec === "copy" 
+        ? ["-c:a", "copy"]
+        : ["-c:a", audioCodec, "-b:a", audioBitrate, "-ac", "2"]; // Stereo downmix for low quality
+
+    // FFmpeg command: scale video, handle audio, copy subs
     const ffmpegArgs = [
         "ffmpeg",
         "-ss", start.toString(),
         "-i", path,
         "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
         
-        // Optimisations CPU extrêmes pour Xeon sans GPU + Contrôle du Bitrate (VBR Constrained)
+        // Video: libx264 ultrafast + constrained VBR
         "-c:v", "libx264", 
         "-preset", "ultrafast", 
         "-crf", crf, 
-        "-maxrate", maxrate, // Force FFmpeg à ne pas dépasser ce bitrate
-        "-bufsize", bufsize, // Nécessaire quand on utilise maxrate
+        "-maxrate", maxrate,
+        "-bufsize", bufsize,
         "-threads", "4", 
         "-sws_flags", "fast_bilinear",
         "-vf", `scale=${scale}`,
         
-        "-c:a", "copy", "-c:s", "copy",
+        ...audioArgs,
+        "-c:s", "copy",
         "-f", "matroska",
-        "-flush_packets", "1", // OBLIGATOIRE : Force l'envoi immédiat des données dans le pipe
+        "-flush_packets", "1",
         "pipe:1"
     ];
 
@@ -492,18 +683,34 @@ const app = new Elysia()
     hostname: "0.0.0.0"
   });
 
-// Store active streaming sessions to track chunk progression
-const streamSessions = new Map<string, { lastStart: number, lastEnd: number, time: number }>();
-
-// Helper function to clean up old sessions
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, session] of streamSessions.entries()) {
-        if (now - session.time > 120000) { // Clear if older than 2 minutes (120s)
-            streamSessions.delete(key);
-        }
+// Helper function to find external subtitle files next to a video file
+async function findExternalSubtitles(videoPath: string): Promise<Array<{ filename: string, lang: string, dir: string }>> {
+    try {
+        const dir = dirname(videoPath);
+        const videoName = pathParse(videoPath).name;
+        const files = await readdir(dir);
+        
+        return files
+            .filter(f => {
+                const ext = pathParse(f).ext.toLowerCase();
+                return SUBTITLE_EXTENSIONS.includes(ext) && f.startsWith(videoName);
+            })
+            .map(f => {
+                // Try to extract language from filename pattern: Movie.en.srt, Movie.french.ass
+                const withoutExt = pathParse(f).name;
+                const parts = withoutExt.replace(videoName, '').split('.');
+                const lang = parts.filter(p => p.length > 0).pop() || 'und';
+                
+                return {
+                    filename: f,
+                    lang,
+                    dir
+                };
+            });
+    } catch (e) {
+        return [];
     }
-}, 30000);
+}
 
 // Helper function to serve file with range support
 function serveFile(file: any, headers: any, set: any, path: string, ip: string = "unknown") {
@@ -556,32 +763,32 @@ function serveFile(file: any, headers: any, set: any, path: string, ip: string =
         return "Requested Range Not Satisfiable";
     }
     
-    // NOTE: Système de Chunk Dynamique (Évolutif & Sensible au Seek)
+    // NOTE: Système de Chunk Dynamique (Progressif & Sensible au Seek)
     if (isOpenEnded) {
-        let maxChunkSize = 2 * 1024 * 1024; // 2 MB par défaut (Démarrage ou Seek)
-        
         const sessionKey = `${ip}-${path}`;
         const lastSession = streamSessions.get(sessionKey);
+        let requestCount = 0;
         
-        // Si on a une session récente (moins de 2 minutes)
         if (lastSession && Date.now() - lastSession.time < 120000) {
-            // Tolérance de 1MB car le client peut recouvrir légèrement les ranges
-            // On vérifie si le nouveau start est juste après l'ancien end
             const isContinuation = Math.abs(start - lastSession.lastEnd) < 1 * 1024 * 1024;
             
             if (isContinuation) {
-                maxChunkSize = 50 * 1024 * 1024; // 50 MB (Lecture de croisière)
+                requestCount = lastSession.requests + 1;
             } else {
-                console.log(`[STREAM] Seek détecté ! Réinitialisation du chunk à 2MB.`);
+                // Seek detected — reset to smallest chunk
+                requestCount = 0;
             }
         }
+        
+        // Pick chunk tier based on how many sequential requests we've seen
+        const tierIndex = Math.min(requestCount, CHUNK_TIERS.length - 1);
+        const maxChunkSize = CHUNK_TIERS[tierIndex]!;
         
         if (end - start + 1 > maxChunkSize) {
             end = start + maxChunkSize - 1;
         }
         
-        // Mettre à jour la session
-        streamSessions.set(sessionKey, { lastStart: start, lastEnd: end, time: Date.now() });
+        streamSessions.set(sessionKey, { lastStart: start, lastEnd: end, time: Date.now(), requests: requestCount });
     }
     
     const chunkLength = end - start + 1;

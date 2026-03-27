@@ -31,8 +31,8 @@ async function getFiles(dir: string): Promise<string[]> {
 async function addMovie(filePath: string) {
     const fileName = parse(filePath).name;
     const match = fileName.match(/(.+?)[\.\s\(](\d{4})[\.\s\)]?/);
-    const title = match ? match[1].replace(/\./g, ' ').trim() : fileName.replace(/\./g, ' ').trim();
-    const year = match ? parseInt(match[2]) : undefined;
+    const title = match ? match[1]!.replace(/\./g, ' ').trim() : fileName.replace(/\./g, ' ').trim();
+    const year = match ? parseInt(match[2]!) : undefined;
 
     console.log(`Found new movie: ${title} (${year || 'Unknown'})`);
 
@@ -100,8 +100,8 @@ export async function scanTVShows(dir: string) {
             
             const showPath = join(dir, showDir.name);
             const showNameMatch = showDir.name.match(/(.+?)[\.\s\(](\d{4})[\.\s\)]?/);
-            const showTitle = showNameMatch ? showNameMatch[1].replace(/\./g, ' ').trim() : showDir.name.replace(/\./g, ' ').trim();
-            const showYear = showNameMatch ? parseInt(showNameMatch[2]) : undefined;
+            const showTitle = showNameMatch ? showNameMatch[1]!.replace(/\./g, ' ').trim() : showDir.name.replace(/\./g, ' ').trim();
+            const showYear = showNameMatch ? parseInt(showNameMatch[2]!) : undefined;
             
             // Check if show exists
             let show = await db.select().from(tv_shows).where(eq(tv_shows.folder_path, showPath)).get();
@@ -143,48 +143,80 @@ export async function scanTVShows(dir: string) {
                 const epMatch = fileName.match(/[sS](\d+)[eE](\d+)|(\d+)x(\d+)/);
                 
                 if (epMatch) {
-                    const seasonNum = parseInt(epMatch[1] || epMatch[3]);
-                    const episodeNum = parseInt(epMatch[2] || epMatch[4]);
+                    const seasonNum = parseInt(epMatch[1]! || epMatch[3]!);
+                    const episodeNum = parseInt(epMatch[2]! || epMatch[4]!);
                     
                     // Ensure Season exists
                     let season = await db.select().from(tv_seasons)
-                        .where(eq(tv_seasons.show_id, show.id))
+                        .where(eq(tv_seasons.show_id, show!.id))
                         .get();
                         
                     // Need a better way to check specific season, but SQLite driver might not support AND easily without setup
                     // Doing it manually for now
-                    const seasons = await db.select().from(tv_seasons).where(eq(tv_seasons.show_id, show.id)).all();
+                    const seasons = await db.select().from(tv_seasons).where(eq(tv_seasons.show_id, show!.id)).all();
                     season = seasons.find(s => s.season_number === seasonNum);
                     
                     if (!season) {
-                        let seasonMeta = { title: `Season ${seasonNum}`, summary: null, poster_path: null };
-                        if (show.tmdb_id) {
-                            const tmdbSeason = await getTVSeasonDetails(show.tmdb_id, seasonNum);
+                        let seasonMeta = { title: `Season ${seasonNum}`, summary: null as string | null, poster_path: null as string | null };
+                        let tmdbEpisodes: any[] = [];
+                        if (show!.tmdb_id) {
+                            const tmdbSeason: any = await getTVSeasonDetails(show!.tmdb_id, seasonNum);
                             if (tmdbSeason) {
                                 seasonMeta.title = tmdbSeason.name || seasonMeta.title;
                                 seasonMeta.summary = tmdbSeason.overview || null;
                                 seasonMeta.poster_path = tmdbSeason.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbSeason.poster_path}` : null;
+                                tmdbEpisodes = tmdbSeason.episodes || [];
                             }
                         }
                         
                         const [inserted] = await db.insert(tv_seasons).values({
-                            show_id: show.id,
+                            show_id: show!.id,
                             season_number: seasonNum,
                             ...seasonMeta
                         }).returning();
                         season = inserted;
+                        
+                        // Cache TMDB episode data on the season object for reuse
+                        (season as any)._tmdbEpisodes = tmdbEpisodes;
                     }
 
                     // Check if episode exists
                     const existingEp = await db.select().from(tv_episodes).where(eq(tv_episodes.file_path, file)).get();
                     
                     if (!existingEp) {
-                        console.log(`Adding episode S${seasonNum}E${episodeNum} to ${showTitle}`);
+                        // Try to enrich from TMDB season episode data
+                        let epTitle = `Episode ${episodeNum}`;
+                        let epSummary: string | null = null;
+                        let epStillPath: string | null = null;
+                        let epTmdbId: number | null = null;
+                        
+                        // Retrieve cached TMDB episodes or fetch if not cached
+                        let tmdbEps = (season as any)._tmdbEpisodes;
+                        if (!tmdbEps && show!.tmdb_id) {
+                            const tmdbSeason: any = await getTVSeasonDetails(show!.tmdb_id, seasonNum);
+                            tmdbEps = tmdbSeason?.episodes || [];
+                            (season as any)._tmdbEpisodes = tmdbEps;
+                        }
+                        
+                        if (tmdbEps) {
+                            const tmdbEp = tmdbEps.find((e: any) => e.episode_number === episodeNum);
+                            if (tmdbEp) {
+                                epTitle = tmdbEp.name || epTitle;
+                                epSummary = tmdbEp.overview || null;
+                                epStillPath = tmdbEp.still_path ? `https://image.tmdb.org/t/p/w500${tmdbEp.still_path}` : null;
+                                epTmdbId = tmdbEp.id || null;
+                            }
+                        }
+                        
+                        console.log(`Adding episode S${seasonNum}E${episodeNum} "${epTitle}" to ${showTitle}`);
                         await db.insert(tv_episodes).values({
-                            show_id: show.id,
-                            season_id: season.id,
+                            show_id: show!.id,
+                            season_id: season!.id,
                             episode_number: episodeNum,
-                            title: `Episode ${episodeNum}`,
+                            title: epTitle,
+                            summary: epSummary,
+                            still_path: epStillPath,
+                            tmdb_id: epTmdbId,
                             file_path: file
                         });
                     }

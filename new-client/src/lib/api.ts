@@ -54,18 +54,28 @@ export function getBackdropUrl(path: string | null) {
   return `https://image.tmdb.org/t/p/original${path}`;
 }
 
-const TMDB_API_KEY = "7f43cb4adbc635ccad5c04412b284d34"; // Key from MediaHub project
-const TMDB_BASE_URL = "https://api.themoviedb.org/3";
-
 export async function getMovieDetails(tmdbId: number) {
+  const url = getUrl();
   try {
     console.log(`Fetching details for TMDB ID: ${tmdbId}`);
-    const res = await fetch(`${TMDB_BASE_URL}/movie/${tmdbId}?api_key=${TMDB_API_KEY}&language=fr-FR&append_to_response=credits,videos,release_dates,recommendations,similar`);
+    const res = await fetch(`${url}/tmdb/movie/${tmdbId}`);
     if (!res.ok) throw new Error(`TMDB request failed: ${res.status}`);
     const data = await res.json();
     return data;
   } catch (e) {
     console.error("TMDB Error:", e);
     return null;
+  }
+}
+
+export async function getContinueWatching() {
+  const url = getUrl();
+  try {
+    const res = await fetch(`${url}/continue-watching`);
+    if (!res.ok) throw new Error('Failed to fetch continue watching');
+    return res.json();
+  } catch (e) {
+    console.error("Continue Watching Error:", e);
+    return [];
   }
 }

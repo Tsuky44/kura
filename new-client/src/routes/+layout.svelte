@@ -12,10 +12,8 @@
   $: isPlayerActive = playerState?.isActive;
   $: streamUrl = playerState?.streamUrl;
   $: movieTitle = playerState?.title;
-  $: movieId = playerState?.movieId; // Supposons que tu aies ajouté movieId au store
-
-  // Si movieId n'est pas dans le store, on peut essayer de le déduire de l'URL du stream
-  $: extractedMovieId = movieId || (streamUrl ? parseInt(streamUrl.split('/').pop() || '0', 10) : null);
+  $: mediaId = playerState?.mediaId;
+  $: resumeTime = playerState?.resumeTime || 0;
 </script>
 
 <div class="min-h-screen text-text font-sans selection:bg-primary/30" class:bg-transparent={playerState.isActive} class:bg-background={!playerState.isActive}>
@@ -25,8 +23,9 @@
             <Player 
                 streamUrl={playerState.streamUrl} 
                 title={playerState.title}
-                movieId={extractedMovieId} 
+                movieId={mediaId} 
                 apiUrl={$apiUrl || "http://localhost:3000"}
+                resumeTime={resumeTime}
             />
         </div>
     {/if}

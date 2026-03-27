@@ -1,37 +1,35 @@
 <script lang="ts">
     import { page } from '$app/stores';
-    import { getMovies, getStreamUrl, getBackdropUrl, getPosterUrl, getMovieDetails } from '$lib/api';
-    import { playMedia } from '$lib/stores/player';
-    import { Play, ArrowLeft, Star, Clock, Calendar } from 'lucide-svelte';
+    import { getMovies, getStreamUrl, getBackdropUrl, getPosterUrl, getMovieDetails, apiUrl } from '$lib/api';
+    import { openPlayer } from '$lib/stores/player';
+    import { Play, ArrowLeft, RotateCcw, Star, Clock, Calendar } from 'lucide-svelte';
     import { fade } from 'svelte/transition';
-    import { onMount } from 'svelte';
+    import { get } from 'svelte/store';
 
     let movie: any;
+    let movieDuration = 0;
     let isLoading = true;
     let error: string | null = null;
 
-    // Use reactive statement to load when ID changes
     $: id = $page.params.id;
     $: if (id) loadMovie(parseInt(id));
 
+    // true when progress > 1min and not in the last 5% of the film
+    $: canResume = movie && movie.progress > 60 && movieDuration > 0 && movie.progress < movieDuration * 0.95;
+
     async function loadMovie(movieId: number) {
         isLoading = true;
+        error = null;
         try {
-            // 1. Get local movie info
             const movies = await getMovies();
             movie = movies.find((m: any) => m.id === movieId);
-            
-            if (!movie) {
-                error = "Movie not found";
-                return;
-            }
+            if (!movie) { error = "Film introuvable"; return; }
 
-            // 2. Fetch TMDB details if TMDB ID exists
+            // Fetch TMDB metadata
             if (movie.tmdb_id) {
                 try {
                     const tmdbDetails = await getMovieDetails(movie.tmdb_id);
                     if (tmdbDetails) {
-                        // Merge details (TMDB takes precedence for metadata)
                         movie = {
                             ...movie,
                             overview: tmdbDetails.overview || movie.overview,
@@ -41,22 +39,43 @@
                             poster_path: tmdbDetails.poster_path || movie.poster_path
                         };
                     }
-                } catch (tmdbError) {
-                    console.warn("Failed to fetch TMDB details:", tmdbError);
+                } catch (_) {}
+            }
+
+            // Fetch duration from tracks API (needed for 95% threshold)
+            try {
+                const tracksRes = await fetch(`${get(apiUrl)}/movies/${movieId}/tracks`);
+                if (tracksRes.ok) {
+                    const info = await tracksRes.json();
+                    movieDuration = info.duration || movie.duration || 0;
                 }
+            } catch (_) {
+                movieDuration = movie.duration || 0;
             }
 
         } catch (e) {
-            error = "Failed to load movie";
+            error = "Impossible de charger le film";
         } finally {
             isLoading = false;
         }
     }
 
-    function play() {
-        if (movie) {
-            playMedia(movie, getStreamUrl(movie.id));
-        }
+    function formatTime(seconds: number): string {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function resume() {
+        if (!movie) return;
+        openPlayer(getStreamUrl(movie.id), movie.title, movie.id, movie.progress || 0);
+    }
+
+    function playFromStart() {
+        if (!movie) return;
+        openPlayer(getStreamUrl(movie.id), movie.title, movie.id, 0);
     }
 </script>
 
@@ -124,12 +143,22 @@
                         {movie.overview}
                     </p>
 
-                    <div class="flex gap-4">
-                        <button on:click={play} class="bg-primary hover:bg-primary/80 text-white px-8 py-4 rounded-xl font-bold flex items-center gap-3 transition-transform hover:scale-105 shadow-lg shadow-primary/20 text-lg">
-                            <Play class="w-6 h-6 fill-current" />
-                            Play Movie
-                        </button>
-                        <!-- Trailer button, etc -->
+                    <div class="flex gap-4 flex-wrap">
+                        {#if canResume}
+                            <button on:click={resume} class="bg-primary hover:bg-primary/80 text-white px-8 py-4 rounded-xl font-bold flex items-center gap-3 transition-transform hover:scale-105 shadow-lg shadow-primary/20 text-lg">
+                                <Play class="w-6 h-6 fill-current" />
+                                Reprendre à {formatTime(movie.progress)}
+                            </button>
+                            <button on:click={playFromStart} class="bg-surface/60 hover:bg-surface border border-surface text-gray-300 hover:text-white px-6 py-4 rounded-xl font-semibold flex items-center gap-2 transition-colors text-base">
+                                <RotateCcw class="w-5 h-5" />
+                                Recommencer
+                            </button>
+                        {:else}
+                            <button on:click={playFromStart} class="bg-primary hover:bg-primary/80 text-white px-8 py-4 rounded-xl font-bold flex items-center gap-3 transition-transform hover:scale-105 shadow-lg shadow-primary/20 text-lg">
+                                <Play class="w-6 h-6 fill-current" />
+                                Lecture
+                            </button>
+                        {/if}
                     </div>
                 </div>
             </div>

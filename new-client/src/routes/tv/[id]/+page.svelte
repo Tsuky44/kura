@@ -2,7 +2,7 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { Play, ArrowLeft, Star, Calendar, ChevronDown, MonitorPlay } from 'lucide-svelte';
+  import { Play, ArrowLeft, Star, Calendar, ChevronDown, MonitorPlay, RotateCcw } from 'lucide-svelte';
   import { apiUrl } from '$lib/api';
   import { player, openPlayer } from '$lib/stores/player';
 
@@ -42,9 +42,23 @@
       return 'https://via.placeholder.com/500x281?text=No+Image';
   }
 
-  function playEpisode(episode: any) {
+  function playEpisode(episode: any, startTime?: number) {
       const streamUrl = `${$apiUrl}/stream/${episode.id}?type=episode`;
-      openPlayer(streamUrl, `${show.title} - S${show.seasons[selectedSeasonIndex].season_number.toString().padStart(2, '0')}E${episode.episode_number.toString().padStart(2, '0')}`, episode.id);
+      const label = `${show.title} - S${show.seasons[selectedSeasonIndex].season_number.toString().padStart(2, '0')}E${episode.episode_number.toString().padStart(2, '0')}`;
+      const resume = startTime !== undefined ? startTime : (episode.progress || 0);
+      openPlayer(streamUrl, label, episode.id, resume);
+  }
+
+  function canResume(episode: any): boolean {
+      return episode.progress > 60 && episode.duration > 0 && episode.progress < episode.duration * 0.95;
+  }
+
+  function formatTime(seconds: number): string {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = Math.floor(seconds % 60);
+      if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+      return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   }
 </script>
 
@@ -128,40 +142,65 @@
                   {#if show.seasons[selectedSeasonIndex].episodes && show.seasons[selectedSeasonIndex].episodes.length > 0}
                       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                           {#each show.seasons[selectedSeasonIndex].episodes as episode}
-                              <div 
-                                  class="bg-surface/30 border border-surface rounded-xl overflow-hidden hover:bg-surface/60 transition-colors group cursor-pointer flex"
-                                  on:click={() => playEpisode(episode)}
-                              >
-                                  <!-- Thumbnail (Placeholder or actual if extracted) -->
-                                  <div class="w-1/3 aspect-video bg-surface relative shrink-0">
-                                      {#if episode.still_path}
-                                          <img src={getStillUrl(episode.still_path)} alt={episode.title} class="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-                                      {:else}
-                                          <div class="w-full h-full flex items-center justify-center text-gray-600 bg-surface">
-                                              <MonitorPlay class="w-8 h-8" />
+                              <div class="bg-surface/30 border border-surface rounded-xl overflow-hidden hover:bg-surface/60 transition-colors group flex flex-col">
+                                  <!-- Thumbnail row -->
+                                  <div class="flex">
+                                      <!-- Thumbnail -->
+                                      <button
+                                          class="w-1/3 aspect-video bg-surface relative shrink-0 cursor-pointer"
+                                          on:click={() => playEpisode(episode)}
+                                      >
+                                          {#if episode.still_path}
+                                              <img src={getStillUrl(episode.still_path)} alt={episode.title} class="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                                          {:else}
+                                              <div class="w-full h-full flex items-center justify-center text-gray-600 bg-surface">
+                                                  <MonitorPlay class="w-8 h-8" />
+                                              </div>
+                                          {/if}
+                                          <div class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                                              <Play class="w-10 h-10 text-white fill-current" />
                                           </div>
-                                      {/if}
-                                      <div class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
-                                          <Play class="w-10 h-10 text-white fill-current" />
+                                          <!-- Progress Bar -->
+                                          {#if episode.progress > 0 && episode.duration > 0}
+                                              <div class="absolute bottom-0 left-0 h-1 bg-primary" style="width: {Math.min((episode.progress / episode.duration) * 100, 100)}%"></div>
+                                          {/if}
+                                      </button>
+
+                                      <!-- Episode Info -->
+                                      <div class="p-4 flex flex-col justify-center w-2/3">
+                                          <div class="text-primary text-sm font-bold mb-1">Épisode {episode.episode_number}</div>
+                                          <h3 class="font-bold text-text line-clamp-1">{episode.title}</h3>
+                                          {#if episode.duration}
+                                              <div class="text-xs text-gray-400 mt-1">{Math.floor(episode.duration / 60)} min</div>
+                                          {/if}
                                       </div>
-                                      <!-- Progress Bar -->
-                                      {#if episode.progress > 0 && episode.duration > 0}
-                                          <div class="absolute bottom-0 left-0 h-1 bg-primary" style="width: {(episode.progress / episode.duration) * 100}%"></div>
-                                      {/if}
                                   </div>
-                                  
-                                  <!-- Episode Info -->
-                                  <div class="p-4 flex flex-col justify-center w-2/3">
-                                      <div class="text-primary text-sm font-bold mb-1">
-                                          Épisode {episode.episode_number}
-                                      </div>
-                                      <h3 class="font-bold text-text line-clamp-1 group-hover:text-primary transition-colors">
-                                          {episode.title}
-                                      </h3>
-                                      {#if episode.duration}
-                                          <div class="text-xs text-gray-400 mt-2">
-                                              {Math.floor(episode.duration / 60)} min
-                                          </div>
+
+                                  <!-- Action buttons -->
+                                  <div class="px-3 pb-3 flex gap-2">
+                                      {#if canResume(episode)}
+                                          <button
+                                              on:click={() => playEpisode(episode, episode.progress)}
+                                              class="flex-1 bg-primary hover:bg-primary/80 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 transition-colors"
+                                          >
+                                              <Play class="w-3.5 h-3.5 fill-current" />
+                                              Reprendre à {formatTime(episode.progress)}
+                                          </button>
+                                          <button
+                                              on:click={() => playEpisode(episode, 0)}
+                                              class="bg-surface hover:bg-surface/80 border border-surface text-gray-400 hover:text-white text-xs px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors"
+                                              title="Recommencer depuis le début"
+                                          >
+                                              <RotateCcw class="w-3.5 h-3.5" />
+                                          </button>
+                                      {:else}
+                                          <button
+                                              on:click={() => playEpisode(episode, 0)}
+                                              class="flex-1 bg-surface hover:bg-surface/80 border border-surface text-gray-300 hover:text-white text-xs font-semibold px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 transition-colors"
+                                          >
+                                              <Play class="w-3.5 h-3.5 fill-current" />
+                                              Lecture
+                                          </button>
                                       {/if}
                                   </div>
                               </div>

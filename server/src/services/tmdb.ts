@@ -15,7 +15,7 @@ export async function searchMovie(query: string, year?: number) {
   try {
     const res = await fetch(url.toString());
     if (!res.ok) return null;
-    const data = await res.json();
+    const data: any = await res.json();
     
     if (data.results && data.results.length > 0) {
       return data.results[0];
@@ -41,7 +41,7 @@ export async function searchTVShow(query: string, year?: number) {
   try {
     const res = await fetch(url.toString());
     if (!res.ok) return null;
-    const data = await res.json();
+    const data: any = await res.json();
     
     if (data.results && data.results.length > 0) {
       return data.results[0];
