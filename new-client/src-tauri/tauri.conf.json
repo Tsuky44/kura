@@ -34,9 +34,18 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "libmpv-2.dll",
-      "libmpv-wrapper.dll"
-    ]
+    "resources": {
+      "libmpv-2.dll": "libmpv-2.dll",
+      "libmpv-wrapper.dll": "libmpv-wrapper.dll",
+      "libs/libmpv.dylib": "libmpv.dylib",
+      "libs/libmpv.2.dylib": "libmpv.2.dylib"
+    },
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.13",
+      "exceptionDomain": "",
+      "license": "",
+      "entitlements": null
+    }
   }
 }

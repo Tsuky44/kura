@@ -2,20 +2,69 @@
 
 @theme {
   --color-primary: #6366F1;
-  --color-background: #0F172A;
-  --color-surface: #1E293B;
+  --color-background: #0a0a0f;
+  --color-surface: #151519;
   --color-text: #F8FAFC;
 }
 
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   color-scheme: dark;
-  background-color: var(--color-background);
-  color: var(--color-text);
+  background-color: #0a0a0f;
+  color: #F8FAFC;
+}
+
+* {
+  scroll-behavior: smooth;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
   padding: 0;
   overflow-x: hidden;
+  background-color: #0a0a0f;
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0a0f;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+/* Selection styling */
+::selection {
+  background-color: rgba(99, 102, 241, 0.3);
+  color: white;
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 2px solid #6366F1;
+  outline-offset: 2px;
+}
+
+/* Smooth image loading */
+img {
+  transition: opacity 0.3s ease;
+}
+
+img[src=""] {
+  opacity: 0;
 }

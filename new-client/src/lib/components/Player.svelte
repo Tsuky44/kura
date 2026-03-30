@@ -447,9 +447,10 @@
                     'ontop': 'yes',
                     // ── Cache & Buffering (optimisé pour connexions lentes) ──
                     'cache': 'yes',
-                    'cache-pause': 'yes',                    // Pause proprement quand le buffer est vide (au lieu de stutterer)
-                    'cache-pause-wait': '2',                 // Reprend après 2s de données en cache
-                    'cache-pause-initial': 'yes',            // Bufferise avant de démarrer la lecture
+                    'cache-pause': 'no',                     // Affiche la première image immédiatement sans attendre le buffer (critique pour seek rapide)
+                    'cache-pause-wait': '2',                 // Reprend après 2s de données en cache si stall
+                    'cache-pause-initial': 'no',             // Démarre sans attendre le buffer initial (réduit l'écran noir au chargement)
+                    'hr-seek': 'default',                    // Saute au keyframe le plus proche — pas de décodage backwards coûteux
                     'demuxer-max-bytes': '150MiB',           // Buffer raisonnable (pas 500MB)
                     'demuxer-readahead-secs': '30',          // 30s d'avance au lieu de 60 (moins de pression réseau)
                     'demuxer-max-back-bytes': '50MiB',       // Réduire le cache arrière

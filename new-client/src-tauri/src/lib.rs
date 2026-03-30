@@ -6,6 +6,40 @@ use std::sync::Arc;
 static POLLING_ACTIVE: once_cell::sync::Lazy<Arc<AtomicBool>> =
     once_cell::sync::Lazy::new(|| Arc::new(AtomicBool::new(false)));
 
+#[cfg(target_os = "macos")]
+fn setup_mpv_library_path() {
+    use std::env;
+    use std::path::PathBuf;
+    
+    // Get the executable directory (inside the .app bundle)
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // In a macOS app bundle: MyApp.app/Contents/MacOS/
+            // Resources are in: MyApp.app/Contents/Resources/
+            let resources_dir = exe_dir.parent().map(|p| p.join("Resources"));
+            
+            if let Some(resources) = resources_dir {
+                let libmpv_path = resources.join("libmpv.dylib");
+                let libmpv2_path = resources.join("libmpv.2.dylib");
+                
+                if libmpv_path.exists() || libmpv2_path.exists() {
+                    // Set DYLD_LIBRARY_PATH to include the Resources directory
+                    let current_dyld = env::var("DYLD_LIBRARY_PATH").unwrap_or_default();
+                    let new_path = format!("{}:{}", resources.display(), current_dyld);
+                    env::set_var("DYLD_LIBRARY_PATH", new_path);
+                    
+                    println!("[RUST] Set DYLD_LIBRARY_PATH to: {}", resources.display());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn setup_mpv_library_path() {
+    // No-op on non-macOS platforms
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -58,8 +92,8 @@ fn set_mpv_track(app_handle: tauri::AppHandle, track_type: String, track_id: Str
 }
 
 /// Load a file into MPV with an optional start time.
-/// Sets the 'start' option BEFORE calling loadfile — this is the only reliable way to avoid
-/// a visible seek on screen. MPV will open the file at the correct byte offset from the start.
+/// Sets the 'start' option BEFORE calling loadfile, and appends ?start= to the URL
+/// so the server can use MKV index to serve from the correct byte offset.
 #[tauri::command]
 fn mpv_load_file(app_handle: tauri::AppHandle, url: String, start_time: Option<f64>) -> Result<(), String> {
     use tauri_plugin_libmpv::MpvExt;
@@ -71,6 +105,14 @@ fn mpv_load_file(app_handle: tauri::AppHandle, url: String, start_time: Option<f
     };
 
     let start = start_time.unwrap_or(0.0);
+
+    // Build URL with start parameter for server-side MKV index seek
+    let url_with_start = if start > 0.0 {
+        let separator = if url.contains('?') { "&" } else { "?" };
+        format!("{}{}start={}", url, separator, start as i64)
+    } else {
+        url
+    };
 
     // Always reset 'start' first — if a previous load had a start time, it must be cleared
     // for the next load that doesn't need resume.
@@ -88,9 +130,9 @@ fn mpv_load_file(app_handle: tauri::AppHandle, url: String, start_time: Option<f
         println!("[RUST] Warning: failed to set start={}: {:?}", start_str, e);
     }
 
-    println!("[RUST] mpv_load_file: {} (start={})", url, start_str);
+    println!("[RUST] mpv_load_file: {} (start={})", url_with_start, start_str);
 
-    let load_args = vec![serde_json::json!(url), serde_json::json!("replace")];
+    let load_args = vec![serde_json::json!(url_with_start), serde_json::json!("replace")];
     mpv.command("loadfile", &load_args, &label)
         .map_err(|e| format!("loadfile failed: {:?}", e))
 }
@@ -121,6 +163,9 @@ fn mpv_add_subtitle(app_handle: tauri::AppHandle, sub_url: String) -> Result<(),
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Setup MPV library path on macOS before anything else
+    setup_mpv_library_path();
+    
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())

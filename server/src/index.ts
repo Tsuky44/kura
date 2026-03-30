@@ -3,21 +3,17 @@ import { cors } from '@elysiajs/cors';
 import { db } from './db';
 import { movies, tv_shows, tv_seasons, tv_episodes } from './db/schema';
 import { scanMovies, scanTVShows } from './services/scanner';
+import { getMKVIndex, findByteOffsetForTime } from './services/mkvIndex';
 import { eq, desc, or, gt } from 'drizzle-orm';
 import { join, parse as pathParse, dirname } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { readdir } from 'node:fs/promises';
 
-// ── Streaming session tracking (Adaptive Chunking) ──
-const streamSessions = new Map<string, { lastStart: number, lastEnd: number, time: number, requests: number }>();
+// ── Streaming session tracking (TCP Slow Start Adaptive Chunking) ──
+const streamSessions = new Map<string, { lastStart: number, lastEnd: number, time: number, chunkSize: number }>();
 
-// Chunk ramp-up tiers: start small, grow gradually
-const CHUNK_TIERS = [
-    2  * 1024 * 1024,  // Tier 0: 2MB  (first request / after seek)
-    5  * 1024 * 1024,  // Tier 1: 5MB  (2nd sequential request)
-    10 * 1024 * 1024,  // Tier 2: 10MB (3rd+)
-    25 * 1024 * 1024,  // Tier 3: 25MB (cruise — cap)
-];
+const CHUNK_INITIAL = 3  * 1024 * 1024;  // 3MB — first request or after any seek
+const CHUNK_MAX     = 50 * 1024 * 1024;  // 50MB — cruise cap
 
 // Clean up stale sessions every 30s
 setInterval(() => {
@@ -567,7 +563,7 @@ const app = new Elysia()
         return 'File not found on server disk';
     }
 
-    return serveFile(file, headers, set, path, request.headers.get('x-forwarded-for') || "local");
+    return serveFile(file, headers, set, path, request.headers.get('x-forwarded-for') || "local", query.start ? parseFloat(query.start as string) : undefined);
   })
   .get('/transcode/:id', async ({ request, params: { id }, query, set }) => {
     const isEpisode = query.type === 'episode';
@@ -712,12 +708,23 @@ async function findExternalSubtitles(videoPath: string): Promise<Array<{ filenam
     }
 }
 
-// Helper function to serve file with range support
-function serveFile(file: any, headers: any, set: any, path: string, ip: string = "unknown") {
+// Helper function to serve file with range support and MKV-aware seeking
+async function serveFile(file: any, headers: any, set: any, path: string, ip: string = "unknown", startTime?: number) {
     const size = file.size;
     const range = headers['range'];
+    const isMKV = path.toLowerCase().endsWith('.mkv');
 
-    // Robust MIME type detection
+    // For MKV with startTime: use index to map timestamp → byte offset
+    let mkvOffset = 0;
+    if (isMKV && startTime && startTime > 0 && range) {
+        const index = await getMKVIndex(path);
+        if (index) {
+            mkvOffset = findByteOffsetForTime(index, startTime);
+            console.log(`[STREAM] MKV resume: ${startTime}s → byte offset ${mkvOffset} (~${(mkvOffset/1024/1024).toFixed(1)}MB)`);
+        }
+    }
+
+    // ROBUST MIME type detection (moved up to use before potential redirect)
     let mimeType = file.type;
     if (!mimeType || mimeType === 'application/octet-stream') {
         const ext = path.split('.').pop()?.toLowerCase();
@@ -726,7 +733,26 @@ function serveFile(file: any, headers: any, set: any, path: string, ip: string =
         else if (ext === 'avi') mimeType = 'video/x-msvideo';
         else if (ext === 'mov') mimeType = 'video/quicktime';
         else if (ext === 'webm') mimeType = 'video/webm';
-        else mimeType = 'video/mp4'; // Fallback
+        else mimeType = 'video/mp4';
+    }
+
+    // AGGRESSIVE SEEK: When ?start= is present and requesting byte 0,
+    // immediately redirect to the correct byte offset using 302
+    // This forces MPV to start downloading from the resume position, not from 0
+    if (isMKV && mkvOffset > 0 && range) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        const requestedStart = parseInt(parts[0], 10);
+
+        // If MPV requests from beginning (0-100KB range) but we want to resume further,
+        // send a 302 redirect to force it to request from the correct offset
+        if (!isNaN(requestedStart) && requestedStart < 100 * 1024) {
+            // Build redirect URL without ?start= (to avoid loops), keeping other params
+            const redirectUrl = `/stream/direct/${encodeURIComponent(path)}?offset=${mkvOffset}&mime=${encodeURIComponent(mimeType)}`;
+            console.log(`[STREAM] 302 Redirect for resume: ${range} → offset ${mkvOffset}`);
+            set.status = 302;
+            set.headers["Location"] = redirectUrl;
+            return "Redirecting to resume position";
+        }
     }
 
     if (!range) {
@@ -741,6 +767,13 @@ function serveFile(file: any, headers: any, set: any, path: string, ip: string =
     const parts = range.replace(/bytes=/, "").split("-");
     let start = parseInt(parts[0], 10);
     let end = parts[1] ? parseInt(parts[1], 10) : NaN;
+
+    // Apply MKV offset for resume: if range starts near 0 and we have a startTime offset
+    if (mkvOffset > 0 && start < 100 * 1024) {
+        // MKV header is ~100KB, if request is in header area, adjust to actual data position
+        start = mkvOffset;
+        console.log(`[STREAM] Adjusted range start to ${start} for resume`);
+    }
 
     // Handle suffix range (e.g. bytes=-500)
     if (isNaN(start) && !isNaN(end)) {
@@ -763,32 +796,26 @@ function serveFile(file: any, headers: any, set: any, path: string, ip: string =
         return "Requested Range Not Satisfiable";
     }
     
-    // NOTE: Système de Chunk Dynamique (Progressif & Sensible au Seek)
+    // TCP Slow Start: 3MB on seek/first request, doubles each continuation up to 50MB
     if (isOpenEnded) {
         const sessionKey = `${ip}-${path}`;
         const lastSession = streamSessions.get(sessionKey);
-        let requestCount = 0;
-        
+        let chunkSize = CHUNK_INITIAL;
+
         if (lastSession && Date.now() - lastSession.time < 120000) {
             const isContinuation = Math.abs(start - lastSession.lastEnd) < 1 * 1024 * 1024;
-            
             if (isContinuation) {
-                requestCount = lastSession.requests + 1;
-            } else {
-                // Seek detected — reset to smallest chunk
-                requestCount = 0;
+                // Sequential read — double the window (TCP Slow Start)
+                chunkSize = Math.min(lastSession.chunkSize * 2, CHUNK_MAX);
             }
+            // else: seek detected → reset to CHUNK_INITIAL (already set above)
         }
-        
-        // Pick chunk tier based on how many sequential requests we've seen
-        const tierIndex = Math.min(requestCount, CHUNK_TIERS.length - 1);
-        const maxChunkSize = CHUNK_TIERS[tierIndex]!;
-        
-        if (end - start + 1 > maxChunkSize) {
-            end = start + maxChunkSize - 1;
+
+        if (end - start + 1 > chunkSize) {
+            end = start + chunkSize - 1;
         }
-        
-        streamSessions.set(sessionKey, { lastStart: start, lastEnd: end, time: Date.now(), requests: requestCount });
+
+        streamSessions.set(sessionKey, { lastStart: start, lastEnd: end, time: Date.now(), chunkSize });
     }
     
     const chunkLength = end - start + 1;
@@ -805,4 +832,64 @@ function serveFile(file: any, headers: any, set: any, path: string, ip: string =
     return file.slice(start, end + 1);
 }
 
-console.log(`🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`);
+// ── Direct stream endpoint for MKV resume redirects ──
+// This endpoint serves from a specific byte offset without requiring ?start=
+// It's used internally for 302 redirects when resuming MKV playback
+app.get('/stream/direct/:path', async ({ params, query, headers, set }) => {
+    try {
+        const filePath = decodeURIComponent(params.path);
+        const offset = parseInt(query.offset as string, 10) || 0;
+        const mimeType = decodeURIComponent(query.mime as string) || 'video/x-matroska';
+
+        const file = Bun.file(filePath);
+        if (!(await file.exists())) {
+            set.status = 404;
+            return 'File not found';
+        }
+
+        const size = file.size;
+        const range = headers['range'];
+
+        if (!range) {
+            // No range - serve from offset with TCP Slow Start
+            const chunkSize = CHUNK_INITIAL;
+            const end = Math.min(offset + chunkSize - 1, size - 1);
+
+            console.log(`[DIRECT] Resume from ${offset}-${end}/${size} (~${((end-offset+1)/1024/1024).toFixed(2)}MB)`);
+
+            set.status = 206;
+            set.headers["Accept-Ranges"] = "bytes";
+            set.headers["Content-Range"] = `bytes ${offset}-${end}/${size}`;
+            set.headers["Content-Length"] = (end - offset + 1).toString();
+            set.headers["Content-Type"] = mimeType;
+
+            return file.slice(offset, end + 1);
+        }
+
+        // Has range - adjust relative to offset
+        const rangeStr = range || 'bytes=0-';
+        const parts = rangeStr.replace(/bytes=/, "").split("-");
+        let start = parseInt(parts[0], 10) + offset;
+        let end = parts[1] ? parseInt(parts[1], 10) + offset : size - 1;
+
+        // Validate
+        if (start >= size) start = size - 1;
+        if (end >= size) end = size - 1;
+
+        const chunkLength = end - start + 1;
+        console.log(`[DIRECT] Range ${range} → ${start}-${end}/${size} (~${(chunkLength/1024/1024).toFixed(2)}MB)`);
+
+        set.status = 206;
+        set.headers["Accept-Ranges"] = "bytes";
+        set.headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+        set.headers["Content-Length"] = chunkLength.toString();
+        set.headers["Content-Type"] = mimeType;
+
+        return file.slice(start, end + 1);
+
+    } catch (e) {
+        console.error('[DIRECT] Error:', e);
+        set.status = 500;
+        return 'Server error';
+    }
+});

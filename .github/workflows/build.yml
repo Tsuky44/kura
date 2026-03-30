@@ -1,0 +1,43 @@
+name: Build Tauri App
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install dependencies
+        run: |
+          cd new-client
+          npm install
+
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: ./new-client
+          includeDebug: false
+          args: --target universal-apple-darwin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: |
+            new-client/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            new-client/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
