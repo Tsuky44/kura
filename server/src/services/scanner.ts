@@ -92,6 +92,44 @@ export async function scanMovies(dir: string) {
 export async function scanTVShows(dir: string) {
     console.log(`Starting TV Show scan in: ${dir}`);
     
+    // ── Phase 1: Cleanup deleted episodes ──
+    try {
+        const allEpisodes = await db.select().from(tv_episodes).all();
+        for (const ep of allEpisodes) {
+            try {
+                const exists = await Bun.file(ep.file_path).exists();
+                if (!exists) {
+                    console.log(`[CLEANUP] Episode file missing, removing from DB: ${ep.title} (${ep.file_path})`);
+                    await db.delete(tv_episodes).where(eq(tv_episodes.id, ep.id));
+                }
+            } catch (e) {
+                console.error(`[CLEANUP] Error checking episode ${ep.id}:`, e);
+            }
+        }
+        
+        // Also cleanup empty seasons (no episodes) and empty shows (no seasons)
+        const allSeasons = await db.select().from(tv_seasons).all();
+        for (const season of allSeasons) {
+            const episodesInSeason = await db.select().from(tv_episodes).where(eq(tv_episodes.season_id, season.id)).all();
+            if (episodesInSeason.length === 0) {
+                console.log(`[CLEANUP] Empty season, removing: Season ${season.season_number}`);
+                await db.delete(tv_seasons).where(eq(tv_seasons.id, season.id));
+            }
+        }
+        
+        const allShows = await db.select().from(tv_shows).all();
+        for (const show of allShows) {
+            const seasonsInShow = await db.select().from(tv_seasons).where(eq(tv_seasons.show_id, show.id)).all();
+            if (seasonsInShow.length === 0) {
+                console.log(`[CLEANUP] Empty show, removing: ${show.title}`);
+                await db.delete(tv_shows).where(eq(tv_shows.id, show.id));
+            }
+        }
+    } catch (e) {
+        console.error('[CLEANUP] Error during TV cleanup:', e);
+    }
+    
+    // ── Phase 2: Scan for new content ──
     try {
         const shows = await readdir(dir, { withFileTypes: true });
         

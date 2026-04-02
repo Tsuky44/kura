@@ -16,7 +16,7 @@
   $: resumeTime = playerState?.resumeTime || 0;
 </script>
 
-<div class="min-h-screen bg-[#0a0a0f] text-white font-sans selection:bg-primary/30" class:bg-transparent={playerState.isActive}>
+<div class="min-h-screen text-white font-sans selection:bg-primary/30" style="background-color: {playerState?.isActive ? 'transparent' : '#0a0a0f'}">
     <!-- Global Player Overlay -->
     {#if playerState.isActive}
         <div class="fixed inset-0 z-[100] bg-transparent">

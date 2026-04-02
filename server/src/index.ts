@@ -679,6 +679,36 @@ const app = new Elysia()
     hostname: "0.0.0.0"
   });
 
+// ── Periodic Auto-Scan: Run every 30 minutes to keep library in sync ──
+const AUTO_SCAN_INTERVAL = 30 * 60 * 1000; // 30 minutes in milliseconds
+
+setInterval(async () => {
+    if (isScanning) {
+        console.log('[AUTO-SCAN] Skipping: scan already in progress');
+        return;
+    }
+    
+    console.log('[AUTO-SCAN] Starting periodic library scan...');
+    isScanning = true;
+    
+    const movieDir = join(process.cwd(), 'movies');
+    const tvDir = join(process.cwd(), 'tvshows');
+    
+    try {
+        await Promise.all([
+            scanMovies(movieDir).catch(e => console.error('[AUTO-SCAN] Movie scan failed:', e)),
+            scanTVShows(tvDir).catch(e => console.error('[AUTO-SCAN] TV scan failed:', e))
+        ]);
+        console.log('[AUTO-SCAN] Library scan completed successfully');
+    } catch (e) {
+        console.error('[AUTO-SCAN] Error during auto-scan:', e);
+    } finally {
+        isScanning = false;
+    }
+}, AUTO_SCAN_INTERVAL);
+
+console.log(`[AUTO-SCAN] Periodic scan enabled: every ${AUTO_SCAN_INTERVAL / 60000} minutes`);
+
 // Helper function to find external subtitle files next to a video file
 async function findExternalSubtitles(videoPath: string): Promise<Array<{ filename: string, lang: string, dir: string }>> {
     try {
@@ -869,7 +899,7 @@ app.get('/stream/direct/:path', async ({ params, query, headers, set }) => {
         // Has range - adjust relative to offset
         const rangeStr = range || 'bytes=0-';
         const parts = rangeStr.replace(/bytes=/, "").split("-");
-        let start = parseInt(parts[0], 10) + offset;
+        let start = parseInt(parts[0] ?? '0', 10) + offset;
         let end = parts[1] ? parseInt(parts[1], 10) + offset : size - 1;
 
         // Validate

@@ -2145,7 +2145,9 @@ dependencies = [
 name = "new-client"
 version = "0.1.0"
 dependencies = [
+ "objc2",
  "once_cell",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tauri",

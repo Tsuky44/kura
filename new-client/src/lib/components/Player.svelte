@@ -60,6 +60,12 @@
     let networkError = false;
     let retryCount = 0;
 
+    // Black background overlay: true until MPV renders first frame
+    let isVideoStarted = false;
+
+    // MPV init error state (library load / init failure)
+    let mpvError: string | null = null;
+
     // Buffer/cache time (for YouTube-style buffered bar)
     let cacheTime = 0;
 
@@ -433,18 +439,19 @@
         document.documentElement.style.backgroundColor = 'transparent';
         document.body.style.backgroundColor = 'transparent';
 
+        const isMacOS = navigator.platform.toLowerCase().startsWith('mac');
+
         try {
             await init({
                 initialOptions: {
                     'vo': 'gpu',
-                    'gpu-context': 'auto',
-                    'hwdec': 'auto',
+                    'hwdec': isMacOS ? 'videotoolbox' : 'auto',
+                    ...(isMacOS ? { 'log-file': '/tmp/mpv-kuma.log', 'msg-level': 'all=v' } : {}),
                     'hwdec-codecs': 'all',
                     'input-default-bindings': 'yes',
                     'idle': 'yes',
                     'keep-open': 'yes',
-                    'force-window': 'yes',
-                    'ontop': 'yes',
+                    'ytdl': 'no',
                     // ── Cache & Buffering (optimisé pour connexions lentes) ──
                     'cache': 'yes',
                     'cache-pause': 'no',                     // Affiche la première image immédiatement sans attendre le buffer (critique pour seek rapide)
@@ -479,6 +486,7 @@
             if (streamUrl) {
                 console.log(`[PLAYER] Loading: ${streamUrl} | resume: ${resumeTime}s`);
                 isLoading = true;
+                isVideoStarted = false;
                 await invoke('mpv_load_file', { url: streamUrl, startTime: resumeTime });
                 await enforceSubtitleBottom();
                 await setProperty('pause', false);
@@ -533,6 +541,16 @@
 
             unlistenTime = await listen<number>('mpv-time-update', (event) => {
                 position = event.payload;
+                if (!isVideoStarted && event.payload > 0) {
+                    isVideoStarted = true;
+                    // macOS: attach the floating MPV window as a child window
+                    // positioned exactly behind Kuma so it shows through the
+                    // transparent WebView area.
+                    if (isMacOS) {
+                        invoke('attach_mpv_window').catch((e: unknown) =>
+                            console.warn('[PLAYER] attach_mpv_window:', e));
+                    }
+                }
                 if (isLoading && event.payload > 0) {
                     isLoading = false;
                 }
@@ -599,6 +617,7 @@
 
         } catch (e) {
             console.error("MPV Init Failed:", e);
+            mpvError = e instanceof Error ? e.message : String(e);
         }
     });
 
@@ -658,10 +677,15 @@
      class:cursor-none={!showControls}
      transition:fade={{ duration: 300 }}>
      
+    <!-- Black background: covers transparent window until MPV renders first frame -->
+    {#if !isVideoStarted}
+    <div class="absolute inset-0 z-0 bg-black" transition:fade={{ duration: 400 }}></div>
+    {/if}
+
     <!-- Video Area -->
     <div 
-        class="absolute inset-0 z-0" 
-        style="background-color: rgba(0,0,0,0.01);" 
+        class="absolute inset-0 z-10" 
+        style="background-color: transparent;" 
         on:click={togglePlay}
         on:dblclick={handleVideoDblClick}
         role="button"
@@ -672,6 +696,20 @@
     {#if isLoading && !networkError}
     <div class="absolute inset-0 z-30 flex items-center justify-center pointer-events-none" transition:fade={{ duration: 200 }}>
         <div class="w-16 h-16 border-4 border-white/20 border-t-primary rounded-full animate-spin"></div>
+    </div>
+    {/if}
+
+    <!-- MPV Init Error Overlay -->
+    {#if mpvError}
+    <div class="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/80 pointer-events-auto" transition:fade={{ duration: 300 }}>
+        <span class="material-symbols-outlined text-red-400 text-6xl mb-4">broken_image</span>
+        <h2 class="text-white text-2xl font-bold mb-2">MPV introuvable</h2>
+        <p class="text-white/60 text-sm mb-2">Le lecteur vidéo n'a pas pu démarrer.</p>
+        <p class="text-white/40 text-xs mb-6 max-w-md text-center">Sur macOS, installez mpv via Homebrew : <code class="bg-white/10 px-1 rounded">brew install mpv</code></p>
+        <p class="text-red-400/70 text-xs mb-6 max-w-md text-center break-all">{mpvError}</p>
+        <button on:click={stop} class="bg-white/10 hover:bg-white/20 text-white px-8 py-3 rounded-xl font-bold transition-all">
+            Fermer
+        </button>
     </div>
     {/if}
 
