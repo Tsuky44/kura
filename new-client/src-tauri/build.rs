@@ -91,5 +91,18 @@ fn main() {
         }
     }
 
+    // macOS: link libmpv directly (needed by mpv_metal.rs #[link(name = "mpv")])
+    if target_os == "macos" {
+        let libs_dir = Path::new(&manifest_dir).join("libs");
+        println!("cargo:rustc-link-search=native={}", libs_dir.display());
+        println!("cargo:rustc-link-search=native=/opt/homebrew/lib");
+        println!("cargo:rustc-link-search=native=/opt/homebrew/opt/mpv/lib");
+        println!("cargo:rustc-link-search=native=/usr/local/lib");
+        println!("cargo:rustc-link-lib=dylib=mpv");
+        // Metal framework needed for MTLCreateSystemDefaultDevice
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=QuartzCore");
+    }
+
     tauri_build::build()
 }

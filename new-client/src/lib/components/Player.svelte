@@ -2,6 +2,26 @@
     import { onMount, onDestroy } from 'svelte';
     import { fade } from 'svelte/transition';
     import { init, command, getProperty, setProperty } from 'tauri-plugin-libmpv-api';
+
+    // macOS uses the mpv_metal_* commands (render context, no floating window)
+    const isMacOS = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().startsWith('mac');
+
+    async function mpvSetProp(name: string, value: any) {
+        if (isMacOS) return invoke('mpv_metal_set_prop', { name, value });
+        return setProperty(name, value);
+    }
+    async function mpvGetProp(name: string): Promise<any> {
+        if (isMacOS) return invoke('mpv_metal_get_prop', { name });
+        return getProperty(name);
+    }
+    async function mpvCmd(name: string, args: any[] = []) {
+        if (isMacOS) return invoke('mpv_metal_cmd', { name, args });
+        return command(name, args);
+    }
+    async function mpvLoad(url: string, startTime?: number) {
+        if (isMacOS) return invoke('mpv_metal_load', { url, startTime });
+        return invoke('mpv_load_file', { url, startTime });
+    }
     import { listen } from '@tauri-apps/api/event';
     import { getCurrentWindow } from '@tauri-apps/api/window';
     import { invoke } from '@tauri-apps/api/core';
@@ -60,8 +80,9 @@
     let networkError = false;
     let retryCount = 0;
 
-    // Black background overlay: true until MPV renders first frame
-    let isVideoStarted = false;
+    // Black background overlay: true until MPV renders first frame.
+    // On macOS, start without overlay so NSOpenGLView rendering is immediately visible.
+    let isVideoStarted = isMacOS;
 
     // MPV init error state (library load / init failure)
     let mpvError: string | null = null;
@@ -152,9 +173,9 @@
             stopSync();
             startSync(newId, true);
             
-            await invoke('mpv_load_file', { url: streamUrl, startTime: 0 });
+            await mpvLoad(streamUrl, 0);
             await enforceSubtitleBottom();
-            await setProperty('pause', false);
+            await mpvSetProp('pause', false);
             openPlayer(newUrl, newTitle, newId);
             
             const contextRes = await fetch(`${apiUrl}/tv/episode/${movieId}/context`);
@@ -200,9 +221,9 @@
             stopSync();
             startSync(newId, true);
             
-            await invoke('mpv_load_file', { url: streamUrl, startTime: 0 });
+            await mpvLoad(streamUrl, 0);
             await enforceSubtitleBottom();
-            await setProperty('pause', false);
+            await mpvSetProp('pause', false);
             openPlayer(newUrl, newTitle, newId);
             
             const contextRes = await fetch(`${apiUrl}/tv/episode/${movieId}/context`);
@@ -239,12 +260,12 @@
         try {
             cacheTime = newTime;
             if (quality === 'direct') {
-                await setProperty('time-pos', newTime);
+                await mpvSetProp('time-pos', newTime);
             } else {
                 transcodeOffset = newTime;
                 position = 0;
                 const url = buildTranscodeUrl(quality, newTime);
-                await invoke('mpv_load_file', { url, startTime: 0 });
+                await mpvLoad(url, 0);
                 await enforceSubtitleBottom();
             }
         } catch (e) {
@@ -270,7 +291,7 @@
         const target = e.target as HTMLInputElement;
         const val = parseInt(target.value);
         volume = val;
-        setProperty('volume', val);
+        mpvSetProp('volume', val);
     }
 
     async function toggleFullscreen() {
@@ -326,13 +347,11 @@
 
     async function enforceSubtitleBottom() {
         try {
-            await setProperty('sub-pos', 95);
-            await setProperty('sub-use-margins', 'yes');
-            await setProperty('sub-ass-force-margins', 'yes');
-            await setProperty('sub-ass-override', 'force');
-            await setProperty('sub-ass-style-overrides', 'Alignment=2,MarginV=28');
+            // MPV 0.41.0: Only use safe, well-known subtitle properties
+            // sub-ass-override and sub-ass-style-overrides were changed/removed
+            await mpvSetProp('sub-pos', 95);
         } catch (e) {
-            console.warn('[SUBS] Failed to enforce bottom position:', e);
+            console.warn('[SUBS] Failed to set sub-pos:', e);
         }
     }
 
@@ -354,7 +373,7 @@
             await invoke('set_mpv_track', { trackType: type, trackId: mpvId });
         } catch (err) {
             console.warn(`set_mpv_track failed, trying fallback:`, err);
-            try { await command('set', [type, mpvId]); } catch (e2) {
+            try { await mpvCmd('set', [type, mpvId]); } catch (e2) {
                 console.error(`Track switch failed completely for ${type}=${mpvId}`);
             }
         }
@@ -382,7 +401,7 @@
                 loadUrl = buildTranscodeUrl(newQuality, currentTimeToSeek);
             }
             
-            await command('loadfile', [loadUrl]);
+            await mpvCmd('loadfile', [loadUrl]);
             await enforceSubtitleBottom();
             // isLoading will be set to false by the mpv-buffering event
             
@@ -395,7 +414,11 @@
     async function loadExternalSubtitle(sub: { filename: string, lang: string, dir: string }) {
         try {
             const subUrl = `${apiUrl}/subtitles/${encodeURIComponent(sub.filename)}?dir=${encodeURIComponent(sub.dir)}`;
-            await invoke('mpv_add_subtitle', { subUrl });
+            if (isMacOS) {
+                await invoke('mpv_metal_cmd', { name: 'sub-add', args: [subUrl, 'auto'] });
+            } else {
+                await invoke('mpv_add_subtitle', { subUrl });
+            }
             console.log(`[SUBS] Loaded external subtitle: ${sub.filename}`);
         } catch (e) {
             console.error(`[SUBS] Failed to load external subtitle:`, e);
@@ -408,16 +431,16 @@
         isLoading = true;
         try {
             if (quality === 'direct') {
-                await invoke('mpv_load_file', { url: streamUrl, startTime: Math.floor(displayPosition) });
+                await mpvLoad(streamUrl, Math.floor(displayPosition));
                 await enforceSubtitleBottom();
             } else {
                 const url = buildTranscodeUrl(quality, displayPosition);
                 transcodeOffset = displayPosition;
                 position = 0;
-                await invoke('mpv_load_file', { url, startTime: 0 });
+                await mpvLoad(url, 0);
                 await enforceSubtitleBottom();
             }
-            await setProperty('pause', false);
+            await mpvSetProp('pause', false);
         } catch (e) {
             console.error('[RETRY] Failed:', e);
             networkError = true;
@@ -439,61 +462,61 @@
         document.documentElement.style.backgroundColor = 'transparent';
         document.body.style.backgroundColor = 'transparent';
 
-        const isMacOS = navigator.platform.toLowerCase().startsWith('mac');
-
         try {
-            await init({
-                initialOptions: {
-                    'vo': 'gpu',
-                    'hwdec': isMacOS ? 'videotoolbox' : 'auto',
-                    ...(isMacOS ? { 'log-file': '/tmp/mpv-kuma.log', 'msg-level': 'all=v' } : {}),
-                    'hwdec-codecs': 'all',
-                    'input-default-bindings': 'yes',
-                    'idle': 'yes',
-                    'keep-open': 'yes',
-                    'ytdl': 'no',
-                    // ── Cache & Buffering (optimisé pour connexions lentes) ──
-                    'cache': 'yes',
-                    'cache-pause': 'no',                     // Affiche la première image immédiatement sans attendre le buffer (critique pour seek rapide)
-                    'cache-pause-wait': '2',                 // Reprend après 2s de données en cache si stall
-                    'cache-pause-initial': 'no',             // Démarre sans attendre le buffer initial (réduit l'écran noir au chargement)
-                    'hr-seek': 'default',                    // Saute au keyframe le plus proche — pas de décodage backwards coûteux
-                    'demuxer-max-bytes': '150MiB',           // Buffer raisonnable (pas 500MB)
-                    'demuxer-readahead-secs': '30',          // 30s d'avance au lieu de 60 (moins de pression réseau)
-                    'demuxer-max-back-bytes': '50MiB',       // Réduire le cache arrière
-                    'network-timeout': '60',
-                    // ── Sous-titres ──
-                    'sub-auto': 'all',
-                    'subs-with-matching-audio': 'no',
-                    'demuxer-mkv-subtitle-preroll': 'index', // Utilise l'index MKV (quasi instantané) au lieu de re-lire tout le fichier
-                    'demuxer-mkv-subtitle-preroll-secs': '1',// Limite le preroll à 1s max
-                    'sub-ass-override': 'force',
-                    'sub-ass-style-overrides': 'Alignment=2,MarginV=28',
-                    'sub-pos': '95',                         // Position verticale des sous-titres (bas de l'écran)
-                    'sub-use-margins': 'yes',
-                    'sub-ass-force-margins': 'yes',
-                    'sid': 'auto',                           // Sélection automatique rapide
-                    // ── Performance réseau ──
-                    'stream-buffer-size': '512KiB',          // Taille des lectures réseau individuelles
-                }
-            });
-            
+            if (isMacOS) {
+                // ── macOS: true embedding via mpv_render_context + Metal ──
+                // No WID injection, no floating window. MPV renders directly
+                // into a CAMetalLayer subview below the WKWebView.
+                console.log('[PLAYER] macOS: initializing MPV Metal render context...');
+                await invoke('mpv_metal_init');
+                console.log('[PLAYER] mpv_metal_init OK');
+            } else {
+                // ── Windows / Linux: use tauri-plugin-libmpv with WID ──
+                await init({
+                    initialOptions: {
+                        'vo': 'gpu',
+                        'gpu-api': 'auto',
+                        'hwdec': 'auto',
+                        'hwdec-codecs': 'all',
+                        'input-default-bindings': 'yes',
+                        'idle': 'yes',
+                        'keep-open': 'yes',
+                        'ytdl': 'no',
+                        'cache': 'yes',
+                        'cache-pause': 'no',
+                        'cache-pause-wait': '2',
+                        'cache-pause-initial': 'no',
+                        'hr-seek': 'default',
+                        'demuxer-max-bytes': '150MiB',
+                        'demuxer-readahead-secs': '30',
+                        'demuxer-max-back-bytes': '50MiB',
+                        'network-timeout': '60',
+                        'sub-auto': 'all',
+                        'subs-with-matching-audio': 'no',
+                        'demuxer-mkv-subtitle-preroll': 'index',
+                        'demuxer-mkv-subtitle-preroll-secs': '1',
+                        'sub-pos': '95',
+                        'sid': 'auto',
+                        'stream-buffer-size': '512KiB',
+                    }
+                });
+                // Windows/Linux: start Rust property polling
+                try { await invoke('start_mpv_polling'); } catch (e) { console.warn('start_mpv_polling:', e); }
+            }
+
             isReady = true;
-            
-            // Tell Rust to start polling MPV properties
-            try { await invoke('start_mpv_polling'); } catch (e) { console.warn('start_mpv_polling not available:', e); }
-            
+
             if (streamUrl) {
                 console.log(`[PLAYER] Loading: ${streamUrl} | resume: ${resumeTime}s`);
                 isLoading = true;
                 isVideoStarted = false;
-                await invoke('mpv_load_file', { url: streamUrl, startTime: resumeTime });
+                await mpvLoad(streamUrl, resumeTime);
                 await enforceSubtitleBottom();
-                await setProperty('pause', false);
+                await mpvSetProp('pause', false);
             }
-            
+
             try {
-                const vol = await getProperty('volume');
+                const vol = await mpvGetProp('volume');
                 if (typeof vol === 'number') volume = vol;
             } catch (e) {}
             
@@ -543,13 +566,6 @@
                 position = event.payload;
                 if (!isVideoStarted && event.payload > 0) {
                     isVideoStarted = true;
-                    // macOS: attach the floating MPV window as a child window
-                    // positioned exactly behind Kuma so it shows through the
-                    // transparent WebView area.
-                    if (isMacOS) {
-                        invoke('attach_mpv_window').catch((e: unknown) =>
-                            console.warn('[PLAYER] attach_mpv_window:', e));
-                    }
                 }
                 if (isLoading && event.payload > 0) {
                     isLoading = false;
@@ -598,7 +614,7 @@
             interval = setInterval(async () => {
                 if (!isReady) return;
                 try {
-                    const pauseState = await getProperty('pause');
+                    const pauseState = await mpvGetProp('pause');
                     isPaused = pauseState === true;
                 } catch (e) {}
             }, 1500);
@@ -638,7 +654,7 @@
         if (unlistenCacheTime) unlistenCacheTime();
 
         try {
-            await command('stop', []);
+            await mpvCmd('stop', []);
             document.documentElement.style.backgroundColor = '#0f172a';
             document.body.style.backgroundColor = '#0f172a';
         } catch (e) {}
@@ -647,7 +663,7 @@
     async function togglePlay() {
         try {
             const newPauseState = !isPaused;
-            await setProperty('pause', newPauseState);
+            await mpvSetProp('pause', newPauseState);
             isPaused = newPauseState;
             if (newPauseState) sendPause();
         } catch (e) {
@@ -857,7 +873,7 @@
                         </div>
                         
                         <div class="flex items-center gap-4 group/vol">
-                            <button class="text-white/80 hover:text-white transition-colors" on:click={() => { volume = volume === 0 ? 100 : 0; setProperty('volume', volume); }}>
+                            <button class="text-white/80 hover:text-white transition-colors" on:click={() => { volume = volume === 0 ? 100 : 0; mpvSetProp('volume', volume); }}>
                                 <span class="material-symbols-outlined text-2xl">{volume === 0 ? 'volume_off' : volume < 50 ? 'volume_down' : 'volume_up'}</span>
                             </button>
                             <input 
