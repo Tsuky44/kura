@@ -15,7 +15,7 @@
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
     ptr::null_mut,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}},
     time::Duration,
 };
 
@@ -72,15 +72,25 @@ const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
 
 struct MpvState {
     mpv: *mut mpv_handle,
-    // mpv_view: raw NSView* that MPV renders into (via WID + vo=gpu / macos-cocoa-cb)
     mpv_view: *mut c_void,
+    // Event loop handle for graceful shutdown
+    event_thread: Option<std::thread::JoinHandle<()>>,
+    // Flag to signal shutdown to event loop
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 unsafe impl Send for MpvState {}
 unsafe impl Sync for MpvState {}
 
 impl MpvState {
-    fn null() -> Self { Self { mpv: null_mut(), mpv_view: null_mut() } }
+    fn null() -> Self { 
+        Self { 
+            mpv: null_mut(), 
+            mpv_view: null_mut(),
+            event_thread: None,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+        } 
+    }
 }
 
 static STATE: OnceLock<Mutex<MpvState>> = OnceLock::new();
@@ -176,8 +186,13 @@ pub fn init_mpv_metal(
 
         // wid: embed MPV into our NSView (vo=gpu uses macos-cocoa-cb / Metal).
         // Must be set BEFORE mpv_initialize.
-        let wid_str = CString::new(format!("{}", mpv_view as usize)).unwrap();
+        // Convert pointer to signed i64 to avoid overflow with strtoll in MPV
+        let wid_i64 = mpv_view as isize as i64;
+        let wid_str = CString::new(format!("{}", wid_i64)).unwrap();
         mpv_set_option_string(ctx, c"wid".as_ptr(), wid_str.as_ptr());
+
+        // Force Video Output to use modern Metal backend (macvk, then gpu fallback)
+        mpv_set_option_string(ctx, c"vo".as_ptr(), c"macvk,gpu,".as_ptr());
 
         mpv_set_option_string(ctx, c"hwdec".as_ptr(),      c"videotoolbox".as_ptr());
         mpv_set_option_string(ctx, c"hwdec-codecs".as_ptr(), c"all".as_ptr());
@@ -195,27 +210,35 @@ pub fn init_mpv_metal(
             return Err(format!("mpv_initialize failed: {rc}"));
         }
     }
-    println!("[MPV-WID] mpv_initialize OK, wid={}", mpv_view as usize);
+    println!("[MPV-WID] mpv_initialize OK, wid={}", mpv_view as isize as i64);
 
-    // --- Store state
+    // --- Store state with thread handle and shutdown flag
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
     {
         let mut s = state().lock().unwrap();
         s.mpv      = ctx;
         s.mpv_view = mpv_view;
+        s.shutdown_flag = shutdown_flag.clone();
     }
 
     // --- Start event loop thread (property observations → Tauri events)
     let ctx_usize = ctx as usize;
-    std::thread::spawn(move || {
-        event_loop(ctx_usize as *mut mpv_handle, app_handle);
+    let shutdown_flag_clone = shutdown_flag.clone();
+    let handle = std::thread::spawn(move || {
+        event_loop(ctx_usize as *mut mpv_handle, app_handle, shutdown_flag_clone);
     });
+    
+    {
+        let mut s = state().lock().unwrap();
+        s.event_thread = Some(handle);
+    }
 
     Ok(())
 }
 
 // ── 7. Event loop (property observations → Tauri events) ───────────────────
 
-fn event_loop(ctx: *mut mpv_handle, app_handle: tauri::AppHandle) {
+fn event_loop(ctx: *mut mpv_handle, app_handle: tauri::AppHandle, shutdown_flag: Arc<AtomicBool>) {
     use tauri::Emitter;
     unsafe {
         // Observe properties
@@ -227,7 +250,12 @@ fn event_loop(ctx: *mut mpv_handle, app_handle: tauri::AppHandle) {
         mpv_observe_property(ctx, 6, c"track-list".as_ptr(), MPV_FORMAT_NODE);
 
         loop {
-            let event = &*mpv_wait_event(ctx, 5.0);
+            // Check shutdown flag before waiting for event
+            if shutdown_flag.load(Ordering::Relaxed) {
+                println!("[MPV-METAL] shutdown flag set, exiting event loop");
+                break;
+            }
+            let event = &*mpv_wait_event(ctx, 1.0); // 1s timeout for faster shutdown response
             println!("[MPV-EVT] id={}", event.event_id);
             match event.event_id {
                 MPV_EVENT_SHUTDOWN => break,
@@ -285,14 +313,28 @@ fn with_ctx<T, F: FnOnce(*mut mpv_handle) -> T>(f: F) -> Result<T, String> {
 
 /// Called from on_window_event Resized handler.
 /// With vo=gpu + wid, MPV's CocoaCB renderer auto-resizes because the NSView has
-/// setAutoresizingMask:18. A video-reconfig command nudges MPV to update its viewport.
-pub fn resize_metal_layer(_physical_w: f64, _physical_h: f64) {
-    let mpv = {
+/// setAutoresizingMask:18. However, we must also manually set the NSView frame
+/// to the logical size (in points, not pixels) for proper video scaling.
+pub fn resize_metal_layer(logical_w: f64, logical_h: f64) {
+    let (mpv, mpv_view) = {
         let s = state().lock().unwrap();
         if s.mpv.is_null() { return; }
-        s.mpv
+        (s.mpv, s.mpv_view)
     };
+    
     unsafe {
+        // Set the NSView frame to the logical size
+        if !mpv_view.is_null() {
+            let view = &*(mpv_view as *const AnyObject);
+            let frame = CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize { width: logical_w, height: logical_h },
+            };
+            let _: () = msg_send![view, setFrame: frame];
+            println!("[MPV-WID] NSView setFrame: {}x{}", logical_w, logical_h);
+        }
+        
+        // Notify MPV to reconfigure its viewport
         mpv_command_string(mpv, c"video-reconfig".as_ptr());
     }
 }
@@ -300,13 +342,32 @@ pub fn resize_metal_layer(_physical_w: f64, _physical_h: f64) {
 // ── 10. Cleanup ───────────────────────────────────────────────────────────────
 
 pub fn shutdown_mpv_metal() {
-    let mpv = {
+    let (mpv, handle, shutdown_flag) = {
         let mut s = state().lock().unwrap();
         let m = s.mpv;
+        let h = s.event_thread.take();
+        let f = s.shutdown_flag.clone();
         s.mpv      = null_mut();
         s.mpv_view = null_mut();
-        m
+        (m, h, f)
     };
+    
+    // Signal event loop to exit
+    shutdown_flag.store(true, Ordering::Relaxed);
+    
+    // Wait for event loop thread to exit (max 3 seconds)
+    if let Some(h) = handle {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            if h.is_finished() {
+                let _ = h.join();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    
+    // Now safe to destroy MPV context
     if !mpv.is_null() {
         unsafe { mpv_terminate_destroy(mpv) };
     }
@@ -425,6 +486,12 @@ pub fn mpv_metal_resize(app_handle: tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let win = app_handle.get_webview_window("main").ok_or("no window")?;
     let size = win.inner_size().map_err(|e| e.to_string())?;
-    resize_metal_layer(size.width as f64, size.height as f64);
+    let scale = win.scale_factor().map_err(|e| e.to_string())?;
+    
+    // Convert physical pixels to logical points (divide by scale_factor)
+    let logical_w = size.width as f64 / scale;
+    let logical_h = size.height as f64 / scale;
+    
+    resize_metal_layer(logical_w, logical_h);
     Ok(())
 }
